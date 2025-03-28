@@ -391,15 +391,16 @@ class DetectionModel(BaseModel):
         if nc and nc != self.yaml["nc"]:
             LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
             self.yaml["nc"] = nc  # override yaml value
-        if anchors:
+        self.model, self.save = parse_model(deepcopy(self.yaml), ch=[ch])  # model, savelist
+        m = self.model[-1]  # Detect()
+
+        if anchors and not (m is DetectNoAnchor):
             LOGGER.info(f"Overriding model.yaml anchors with anchors={anchors}")
             self.yaml["anchors"] = round(anchors)  # override yaml value
-        self.model, self.save = parse_model(deepcopy(self.yaml), ch=[ch])  # model, savelist
         self.names = [str(i) for i in range(self.yaml["nc"])]  # default names
         self.inplace = self.yaml.get("inplace", True)
 
         # Build strides, anchors
-        m = self.model[-1]  # Detect()
         if isinstance(m, (Detect, Segment)):
 
             def _forward(x):
@@ -414,6 +415,7 @@ class DetectionModel(BaseModel):
             self.stride = m.stride
             self._initialize_biases()  # only run once
         elif isinstance(m, DetectNoAnchor):
+
             def _forward(x):
                 """Passes the input 'x' through the model and returns the processed output."""
                 return self.forward(x)
@@ -545,7 +547,8 @@ def parse_model(d, ch):
     """Parses a YOLOv5 model from a dict `d`, configuring layers based on input channels `ch` and model architecture."""
     LOGGER.info(f"\n{'':>3}{'from':>18}{'n':>3}{'params':>10}  {'module':<40}{'arguments':<30}")
     anchors, nc, gd, gw, act, ch_mul = (
-        d["anchors"],
+        # d["anchors"],
+        d.get("anchors", None),
         d["nc"],
         d["depth_multiple"],
         d["width_multiple"],
@@ -558,7 +561,10 @@ def parse_model(d, ch):
     if not ch_mul:
         ch_mul = 8
     na = (len(anchors[0]) // 2) if isinstance(anchors, list) else anchors  # number of anchors
-    no = na * (nc + 5)  # number of outputs = anchors * (classes + 5)
+    if na:
+        no = na * (nc + 5)  # number of outputs = anchors * (classes + 5)
+    else:
+        no = None
 
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
@@ -589,7 +595,7 @@ def parse_model(d, ch):
             C3x,
         }:
             c1, c2 = ch[f], args[0]
-            if c2 != no:  # if not output
+            if no and c2 != no:  # if not output
                 c2 = make_divisible(c2 * gw, ch_mul)
 
             args = [c1, c2, *args[1:]]
@@ -607,7 +613,7 @@ def parse_model(d, ch):
                 args[1] = [list(range(args[1] * 2))] * len(f)
             if m is Segment:
                 args[3] = make_divisible(args[3] * gw, ch_mul)
-        elif isinstance(m, DetectNoAnchor):
+        elif m is DetectNoAnchor:
             args.append([ch[x] for x in f])
             pass
         elif m is Contract:

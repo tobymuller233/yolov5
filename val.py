@@ -55,6 +55,7 @@ from utils.general import (
     scale_boxes,
     xywh2xyxy,
     xyxy2xywh,
+    non_max_suppression_anchorfree,
 )
 from utils.metrics import ConfusionMatrix, ap_per_class, box_iou
 from utils.plots import output_to_target, plot_images, plot_val_study
@@ -328,31 +329,76 @@ def run(
     pbar = tqdm(dataloader, desc=s, bar_format=TQDM_BAR_FORMAT)  # progress bar
     for batch_i, (im, targets, paths, shapes) in enumerate(pbar):
         callbacks.run("on_val_batch_start")
-        with dt[0]:
-            if cuda:
-                im = im.to(device, non_blocking=True)
-                targets = targets.to(device)
-            im = im.half() if half else im.float()  # uint8 to fp16/32
-            im /= 255  # 0 - 255 to 0.0 - 1.0
-            nb, _, height, width = im.shape  # batch size, channels, height, width
+        batch = {}
+        if targets is not None:
+            with dt[0]:
+                if cuda:
+                    im = im.to(device, non_blocking=True)
+                    targets = targets.to(device)
+                im = im.half() if half else im.float()  # uint8 to fp16/32
+                im /= 255  # 0 - 255 to 0.0 - 1.0
+                nb, _, height, width = im.shape  # batch size, channels, height, width
 
-        # Inference
-        with dt[1]:
-            preds, train_out = model(im) if compute_loss else (model(im, augment=augment), None)
+            # Inference
+            with dt[1]:
+                preds, train_out = model(im) if compute_loss else (model(im, augment=augment), None)
 
-        # Loss
-        if compute_loss:
-            loss += compute_loss(train_out, targets)[1]  # box, obj, cls
+            # Loss
+            if compute_loss:
+                loss += compute_loss(train_out, targets)[1]  # box, obj/dfl, cls
+        else:
+            with dt[0]:
+                batch = im
+                """
+                Preprocess batch of images for YOLO validation.
+                """
+                batch["img"] = batch["img"].to(device, non_blocking=True)
+                batch["img"] = (batch["img"].half() if half else batch["img"].float()) / 255
+                for k in ["batch_idx", "cls", "bboxes"]:
+                    batch[k] = batch[k].to(device)
+
+                height, width = batch["img"].shape[2:]
+                if save_hybrid and task == "detect":
+                    nb = len(batch["img"])
+                    bboxes = batch["bboxes"] * torch.tensor((width, height, width, height), device=device)
+                    lb = [
+                        torch.cat([batch["cls"][batch["batch_idx"] == i], bboxes[batch["batch_idx"] == i]], dim=-1)
+                        for i in range(nb)
+                    ]
+            with dt[1]:
+                preds, train_out = model(batch["img"]) if compute_loss else (model(batch["img"], augment=augment), None)
+
+            if compute_loss:
+                loss += compute_loss(train_out, batch)[1]
+            
+            targets = torch.cat([batch["batch_idx"].unsqueeze(1), batch["cls"], batch["bboxes"]], dim=-1)
+            
+
 
         # NMS
         targets[:, 2:] *= torch.tensor((width, height, width, height), device=device)  # to pixels
         lb = [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []  # for autolabelling
-        with dt[2]:
-            preds = non_max_suppression(
-                preds, conf_thres, iou_thres, labels=lb, multi_label=True, agnostic=single_cls, max_det=max_det
-            )
 
+        if not batch:
+            with dt[2]:
+                preds = non_max_suppression(
+                    preds, conf_thres, iou_thres, labels=lb, multi_label=True, agnostic=single_cls, max_det=max_det
+                )
+        else:
+            with dt[2]:
+                preds = non_max_suppression_anchorfree(
+                    preds, conf_thres, iou_thres, labels=lb, nc=nc, multi_label=True, agnostic=single_cls, max_det=max_det, rotated=task=="obb"
+                )
+            paths = batch["im_file"]
+            # shapes = batch["resize_shape"]
+            temp_resize_shape = batch["resize_shape"]
+            temp_ori_shape = batch["ori_shape"]
+            # shapes = [list(batch[])]
+            nb = len(preds)
+            shapes = [(temp_ori_shape[i], ((temp_resize_shape[i][0] / temp_ori_shape[i][0], temp_resize_shape[i][1] / temp_ori_shape[i][1]), batch["pad"][i])) for i in range(nb)]
+            im = batch["img"]
         # Metrics
+        
         for si, pred in enumerate(preds):
             labels = targets[targets[:, 0] == si, 1:]
             nl, npr = labels.shape[0], pred.shape[0]  # number of labels, predictions

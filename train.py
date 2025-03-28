@@ -80,7 +80,7 @@ from utils.general import (
 )
 from utils.loggers import LOGGERS, Loggers
 from utils.loggers.comet.comet_utils import check_comet_resume
-from utils.loss import ComputeLoss
+from utils.loss import ComputeLoss, v8DetectionLoss
 from utils.metrics import fitness
 from utils.plots import plot_evolve
 from utils.torch_utils import (
@@ -161,6 +161,18 @@ def train(hyp, opt, device, callbacks):
         with open(hyp, errors="ignore") as f:
             hyp = yaml.safe_load(f)  # load hyps dict
     LOGGER.info(colorstr("hyperparameters: ") + ", ".join(f"{k}={v}" for k, v in hyp.items()))
+
+    # for anchor-free head
+    if "anchorfree" in opt.cfg:
+        opt.cache = False
+        opt.task = "detect"
+        opt.classes = None
+        opt.close_mosaic = 10
+        hyp["mask_ratio"] = 4
+        hyp["box"] = 7.5
+        hyp["cls"] = 0.5
+        hyp["dfl"] = 1.5
+
     opt.hyp = hyp.copy()  # for saving hyps to checkpoints
 
     # Save run settings
@@ -299,6 +311,7 @@ def train(hyp, opt, device, callbacks):
         prefix=colorstr("train: "),
         shuffle=True,
         seed=opt.seed,
+        v8loader="anchorfree" in opt.cfg,
     )
     labels = np.concatenate(dataset.labels, 0)
     mlc = int(labels[:, 0].max())  # max label class
@@ -319,6 +332,7 @@ def train(hyp, opt, device, callbacks):
             workers=workers * 2,
             pad=0.5,
             prefix=colorstr("val: "),
+            v8loader="anchorfree" in opt.cfg,
         )[0]
 
         if not resume:
@@ -334,9 +348,10 @@ def train(hyp, opt, device, callbacks):
 
     # Model attributes
     nl = de_parallel(model).model[-1].nl  # number of detection layers (to scale hyps)
-    hyp["box"] *= 3 / nl  # scale to layers
-    hyp["cls"] *= nc / 80 * 3 / nl  # scale to classes and layers
-    hyp["obj"] *= (imgsz / 640) ** 2 * 3 / nl  # scale to image size and layers
+    if "anchorfree" in opt.cfg:
+        hyp["box"] *= 3 / nl  # scale to layers
+        hyp["cls"] *= nc / 80 * 3 / nl  # scale to classes and layers
+        hyp["obj"] *= (imgsz / 640) ** 2 * 3 / nl  # scale to image size and layers
     hyp["label_smoothing"] = opt.label_smoothing
     model.nc = nc  # attach number of classes to model
     model.hyp = hyp  # attach hyperparameters to model
@@ -354,7 +369,13 @@ def train(hyp, opt, device, callbacks):
     scheduler.last_epoch = start_epoch - 1  # do not move
     scaler = torch.cuda.amp.GradScaler(enabled=amp)
     stopper, stop = EarlyStopping(patience=opt.patience), False
-    compute_loss = ComputeLoss(model)  # init loss class
+
+    if "anchorfree" in opt.cfg:
+        # DONE: anchorfree loss
+        model.args = model.hyp
+        compute_loss = v8DetectionLoss(model)
+    else:   # normal mode
+        compute_loss = ComputeLoss(model)  # init loss class
     callbacks.run("on_train_start")
     LOGGER.info(
         f"Image sizes {imgsz} train, {imgsz} val\n"
@@ -385,9 +406,11 @@ def train(hyp, opt, device, callbacks):
             pbar = tqdm(pbar, total=nb, bar_format=TQDM_BAR_FORMAT)  # progress bar
         optimizer.zero_grad()
         for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
+            train_batch = imgs
             callbacks.run("on_train_batch_start")
             ni = i + nb * epoch  # number integrated batches (since train start)
-            imgs = imgs.to(device, non_blocking=True).float() / 255  # uint8 to float32, 0-255 to 0.0-1.0
+            if targets is not None: # not v8loader
+                imgs = imgs.to(device, non_blocking=True).float() / 255  # uint8 to float32, 0-255 to 0.0-1.0
 
             # Warmup
             if ni <= nw:
@@ -401,7 +424,7 @@ def train(hyp, opt, device, callbacks):
                         x["momentum"] = np.interp(ni, xi, [hyp["warmup_momentum"], hyp["momentum"]])
 
             # Multi-scale
-            if opt.multi_scale:
+            if targets is not None and opt.multi_scale:
                 sz = random.randrange(int(imgsz * 0.5), int(imgsz * 1.5) + gs) // gs * gs  # size
                 sf = sz / max(imgs.shape[2:])  # scale factor
                 if sf != 1:
@@ -410,8 +433,19 @@ def train(hyp, opt, device, callbacks):
 
             # Forward
             with torch.cuda.amp.autocast(amp):
-                pred = model(imgs)  # forward
-                loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                if targets is not None: # not v8loader
+                    pred = model(imgs)  # forward
+                    loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                else:   # V8 LOADER
+                    train_batch["img"] = train_batch["img"].to(device, non_blocking=True).float() / 255
+                    if opt.multi_scale:
+                        sz = random.randrange(int(imgsz * 0.5), int(imgsz * 1.5) + gs) // gs * gs  # size
+                        sf = sz / max(train_batch["img"].shape[2:])  # scale factor
+                        if sf != 1:
+                            ns = [math.ceil(x * sf / gs) * gs for x in train_batch["img"].shape[2:]]
+                            train_batch["img"] = nn.functional.interpolate(train_batch["img"], size=ns, mode="bilinear", align_corners=False)
+                    pred = model(train_batch["img"])
+                    loss, loss_items = compute_loss(pred, train_batch)
                 if RANK != -1:
                     loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
                 if opt.quad:
@@ -431,6 +465,11 @@ def train(hyp, opt, device, callbacks):
                     ema.update(model)
                 last_opt_step = ni
 
+            if targets is None: # v8loader
+                imgs = train_batch["img"]
+                # concat batch_idx, cls and bboxes into targets
+                targets = torch.cat([train_batch["batch_idx"].unsqueeze(1), train_batch["cls"], train_batch["bboxes"]], dim=-1).to(device)
+                paths = train_batch["im_file"]
             # Log
             if RANK in {-1, 0}:
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
