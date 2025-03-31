@@ -615,6 +615,7 @@ def parse_model(d, ch):
                 args[3] = make_divisible(args[3] * gw, ch_mul)
         elif m is DetectNoAnchor:
             args.append([ch[x] for x in f])
+            m.legacy = True # backward compatibility
             pass
         elif m is Contract:
             c2 = ch[f] * args[0] ** 2
