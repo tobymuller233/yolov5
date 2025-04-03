@@ -162,22 +162,28 @@ class TransformerBlock(nn.Module):
 
 
 class Bottleneck(nn.Module):
-    """A bottleneck layer with optional shortcut and group convolution for efficient feature extraction."""
+    """Standard bottleneck."""
 
-    def __init__(self, c1, c2, shortcut=True, g=1, e=0.5):
-        """Initializes a standard bottleneck layer with optional shortcut and group convolution, supporting channel
-        expansion.
+    def __init__(self, c1, c2, shortcut=True, g=1, k=(3, 3), e=0.5):
+        """
+        Initialize a standard bottleneck module.
+
+        Args:
+            c1 (int): Input channels.
+            c2 (int): Output channels.
+            shortcut (bool): Whether to use shortcut connection.
+            g (int): Groups for convolutions.
+            k (Tuple[int, int]): Kernel sizes for convolutions.
+            e (float): Expansion ratio.
         """
         super().__init__()
         c_ = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, c_, 1, 1)
-        self.cv2 = Conv(c_, c2, 3, 1, g=g)
+        self.cv1 = Conv(c1, c_, k[0], 1)
+        self.cv2 = Conv(c_, c2, k[1], 1, g=g)
         self.add = shortcut and c1 == c2
 
     def forward(self, x):
-        """Processes input through two convolutions, optionally adds shortcut if channel dimensions match; input is a
-        tensor.
-        """
+        """Apply bottleneck with optional shortcut connection."""
         return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
 
 

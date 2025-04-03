@@ -215,6 +215,7 @@ def run(
     plots=True,
     callbacks=Callbacks(),
     compute_loss=None,
+    v8loader=False,
 ):
     """
     Evaluates a YOLOv5 model on a dataset and logs performance metrics.
@@ -312,6 +313,7 @@ def run(
             rect=rect,
             workers=workers,
             prefix=colorstr(f"{task}: "),
+            v8loader=v8loader,
         )[0]
 
     seen = 0
@@ -583,6 +585,7 @@ def parse_opt():
     parser.add_argument("--exist-ok", action="store_true", help="existing project/name ok, do not increment")
     parser.add_argument("--half", action="store_true", help="use FP16 half-precision inference")
     parser.add_argument("--dnn", action="store_true", help="use OpenCV DNN for ONNX inference")
+    parser.add_argument("--v8loader", action="store_true", help="use v8 dataloader")
     opt = parser.parse_args()
     opt.data = check_yaml(opt.data)  # check YAML
     opt.save_json |= opt.data.endswith("coco.yaml")

@@ -50,6 +50,9 @@ from models.common import (
     GhostConv,
     Proto,
     DFL,
+    C2f,
+    C3k,
+    C3k2,
 )
 from models.experimental import MixConv2d
 from utils.autoanchor import check_anchor_order
@@ -593,13 +596,16 @@ def parse_model(d, ch):
             nn.ConvTranspose2d,
             DWConvTranspose2d,
             C3x,
+            C2f,
+            C3k,
+            C3k2,
         }:
             c1, c2 = ch[f], args[0]
             if no and c2 != no:  # if not output
                 c2 = make_divisible(c2 * gw, ch_mul)
 
             args = [c1, c2, *args[1:]]
-            if m in {BottleneckCSP, C3, C3TR, C3Ghost, C3x}:
+            if m in {BottleneckCSP, C3, C3TR, C3Ghost, C3x, C2f, C3k2}:
                 args.insert(2, n)  # number of repeats
                 n = 1
         elif m is nn.BatchNorm2d:
