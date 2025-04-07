@@ -24,6 +24,7 @@ import time
 from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
+import warnings
 
 try:
     import comet_ml  # must be imported before torch (if installed)
@@ -92,6 +93,7 @@ from utils.torch_utils import (
     smart_optimizer,
     smart_resume,
     torch_distributed_zero_first,
+    eval_norm,
 )
 from models.maskd import MasKDLoss, MaskModule, MaskModules, Mask_Loss
 
@@ -155,8 +157,8 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
     # Directories
     w = save_dir / "weights"  # weights dir
     (w.parent if evolve else w).mkdir(parents=True, exist_ok=True)  # make dir
-    last, best = w / "last.pt", w / "best.pt"
-
+    last, best = w / "last.pt", w / "best.pt"  # best and last checkpoint
+    
     # Hyperparameters
     if isinstance(hyp, str):
         with open(hyp, errors="ignore") as f:
@@ -227,7 +229,7 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
 
 # create new -----------------------------------------------------------------------   
     # maskdmodule
-    mask_model = MaskModules(hyp["maskd_channel"], hyp["maskd_ntokens"], hyp["maskd_weightmask"])
+    mask_model = MaskModules(hyp["maskd_channels"], hyp["maskd_ntokens"], hyp["maskd_weightmask"])
     # set grad
     for k, v in mask_model.named_parameters():
         v.requires_grad = True # train all layers
@@ -258,7 +260,14 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
         t_ckpt = torch.load(t_weights, map_location="cpu")  # load checkpoint to CPU to avoid CUDA memory leak
         t_model = t_ckpt["model"].float().to(device)
     # Mask Loss
-    mask_loss = Mask_Loss(t_model, maskd_hyp, maskmodules=mask_model)
+    for n, p in t_model.named_parameters():
+        p.requires_grad = False  # freeze teacher model
+    for n, m in t_model.named_modules():
+        if isinstance(m, nn.modules.batchnorm._BatchNorm):
+            m.eval()
+    m = t_model.model[-1]
+    m.maskd = True
+    mask_loss = Mask_Loss(t_model, maskd_hyp, maskmodules=mask_model, device=device)
 # create end -----------------------------------------------------------------------    
 
     # Freeze
@@ -297,7 +306,7 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
             """Linear learning rate scheduler function with decay calculated by epoch proportion."""
             return (1 - x / epochs) * (1.0 - hyp["lrf"]) + hyp["lrf"]  # linear
 
-    scheduler_mask = lr_scheduler.CosineAnnealingLR(mask_optimizer, eta_min=hyp["maskd_mask_lr"]["min_lr"])
+    mask_scheduler = lr_scheduler.CosineAnnealingLR(mask_optimizer, eta_min=hyp["maskd_mask_lr"]["min_lr"], T_max=hyp["maskd_mask_trainiter"])
     scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)  # plot_lr_scheduler(optimizer, scheduler, epochs)
 
     # EMA
@@ -309,7 +318,7 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
     if pretrained:
         if resume:
             best_fitness, start_epoch, epochs = smart_resume(ckpt, optimizer, ema, weights, epochs, resume)
-        del ckpt, csd
+        del ckpt
 
     # DP mode
     if cuda and RANK == -1 and torch.cuda.device_count() > 1:
@@ -428,28 +437,114 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
     
     training_mask = True
     LOGGER.info(f"Training mask module for {hyp['maskd_mask_trainiter']} iterations...")
+    iter_num = 0
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
-        iter_num = 0
         callbacks.run("on_train_epoch_start")
-        model.train()
+        mloss = torch.zeros(3, device=device)  # mean losses
 
         # TODO: maskd mask training
         if training_mask:
             if RANK != -1:
                 train_loader.sampler.set_epoch(epoch)
             pbar = enumerate(train_loader)
-            LOGGER.info(("\n" + "%11s" * 7) % ("Epoch", "GPU_mem", "box_loss", "obj_loss", "cls_loss", "Instances", "Size"))
+            LOGGER.info(("\n" + "%11s" * 8) % ("Epoch", "GPU_mem", "box_loss", "obj_loss", "cls_loss", "mask_loss", "Instances", "Size"))
             if RANK in {-1, 0}:
                 pbar = tqdm(pbar, total=nb, bar_format=TQDM_BAR_FORMAT)  # progress bar 
             
             mask_optimizer.zero_grad()
             mask_loss.register_hook()
             
+            eval_norm(mask_loss.mask_modules)
             for i, (imgs, targets, paths, _) in pbar:   # batch -------------------------------------------------------------
                 iter_num += 1
                 train_batch = imgs
+                callbacks.run("on_train_start")
+                ni = i + nb * epoch  # number integrated batches (since train start)
+                if targets is not None: # not v8loader
+                    imgs = imgs.to(device, non_blocking=True).float() / 255  # uint8 to float32, 0-255 to 0.0-1.0
                 
-            pass
+                # Warmup
+                if ni <= nw:
+                    xi = [0, nw]
+                    accumulate = max(1, np.interp(ni, xi, [1, nbs / batch_size]).round())
+                    # for j, x in enumerate(mask_optimizer.param_groups):
+                    #     # bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
+                    #     x["lr"] = np.interp(ni, xi, [hyp["warmup_bias_lr"] if j == 0 else 0.0, x["initial_lr"] * lf(epoch)])
+                    #     if "momentum" in x:
+                    #         x["momentum"] = np.interp(ni, xi, [hyp["warmup_momentum"], hyp["momentum"]])
+                
+                # Multi-scale
+                if targets is not None and opt.multi_scale:
+                    sz = random.randrange(int(imgsz * 0.5), int(imgsz * 1.5) + gs) // gs * gs
+                    sf = sz / max(imgs.shape[2:])  # scale factor
+                    if sf != 1:
+                        ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]
+                        imgs = nn.functional.interpolate(imgs, size=ns, mode="bilinear", align_corners=False)
+                # Forward
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    with torch.cuda.amp.autocast(amp):
+                        if targets is not None:
+                            pred = t_model(imgs)
+                            loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                        else:   # V8 LOADER
+                            train_batch["img"] = train_batch["img"].to(device, non_blocking=True).float() / 255
+                            if opt.multi_scale:
+                                sz = random.randrange(int(imgsz * 0.5), int(imgsz * 1.5) + gs) // gs * gs
+                                sf = sz / max(train_batch["img"].shape[2:])
+                                if sf != 1:
+                                    ns = [math.ceil(x * sf / gs) * gs for x in train_batch["img"].shape[2:]]
+                                    train_batch["img"] = nn.functional.interpolate(train_batch["img"], size=ns, mode="bilinear", align_corners=False)
+                            pred = t_model(train_batch["img"])
+                            loss, loss_items = compute_loss(pred, train_batch)
+                        if RANK != -1:
+                            loss *= WORLD_SIZE
+                        if opt.quad:
+                            loss *= 4.0
+                        maskd_loss = mask_loss.get_loss()
+                        loss += maskd_loss
+                # Backward
+                scaler.scale(loss).backward()
+                mask_loss.reset_loss()
+                # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
+                if ni - last_opt_step >= accumulate:
+                    scaler.unscale_(mask_optimizer)  # unscale gradients
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)  # clip gradients
+                    scaler.step(mask_optimizer)  # optimizer.step
+                    scaler.update()
+                    mask_optimizer.zero_grad()
+                    last_opt_step = ni
+
+                if targets is None: # v8loader
+                    imgs = train_batch["img"]
+                    # concat batch_idx, cls and bboxes into targets
+                    targets = torch.cat([train_batch["batch_idx"].unsqueeze(1), train_batch["cls"], train_batch["bboxes"]], dim=-1).to(device)
+                    paths = train_batch["im_file"]
+                # Log
+                if RANK in {-1, 0}:
+                    mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
+                    mem = f"{torch.cuda.memory_reserved() / 1e9 if torch.cuda.is_available() else 0:.3g}G"  # (GB)
+                    pbar.set_description(
+                        ("%11s" * 2 + "%11.4g" * 6)
+                        % (f"{epoch}/{epochs - 1}", mem, *mloss, loss, targets.shape[0], imgs.shape[-1])
+                    )
+                    callbacks.run("on_train_batch_end", model, ni, imgs, targets, paths, list(mloss))
+                    if callbacks.stop_training:
+                        return
+                mask_scheduler.step()
+            mask_loss.remove_handle_()       
+            if iter_num >= hyp["maskd_mask_trainiter"]:
+                training_mask = False
+                # save maskmodule
+                mask_loss.save_checkpoint(iter=iter_num, optimizer=mask_optimizer, loss=loss, save_dir=w / "maskmodule.pt")
+                LOGGER.info(f"Mask module saved to {w / 'maskmodule.pt'}")
+                continue
+            continue
+        
+        if opt.mask_only:
+            return
+        # distillation
+        model.train()
         # Update image weights (optional, single-GPU only)
         if opt.image_weights:
             cw = model.class_weights.cpu().numpy() * (1 - maps) ** 2 / nc  # class weights
@@ -460,7 +555,6 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
         # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)
         # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
 
-        mloss = torch.zeros(3, device=device)  # mean losses
         if RANK != -1:
             train_loader.sampler.set_epoch(epoch)
         pbar = enumerate(train_loader)
@@ -469,10 +563,6 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
             pbar = tqdm(pbar, total=nb, bar_format=TQDM_BAR_FORMAT)  # progress bar
         optimizer.zero_grad()
         for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
-            iter_num += 1       # increment iteration number
-            if training_mask and iter_num >= hyp["maskd_mask_trainiter"]:
-                training_mask = False
-                break
             train_batch = imgs
             callbacks.run("on_train_batch_start")
             ni = i + nb * epoch  # number integrated batches (since train start)
@@ -549,9 +639,6 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
                 if callbacks.stop_training:
                     return
             # end batch ------------------------------------------------------------------------------------------------
-        if not training_mask and iter_num:
-            iter_num = 0
-            continue
         
         # Scheduler
         lr = [x["lr"] for x in optimizer.param_groups]  # for loggers
@@ -675,8 +762,9 @@ def parse_opt(known=False):
     parser = argparse.ArgumentParser()
     parser.add_argument("--weights", type=str, default=ROOT / "yolov5s.pt", help="initial student weights path")
     parser.add_argument("--cfg", type=str, default="", help="model.yaml path")
-    parser.add_argument("--teacher_weights", type=str, default=None, help="teacher weights path")
+    parser.add_argument("--teacher-weights", type=str, default=None, help="teacher weights path")
     parser.add_argument("--maskd-hyp", type=str, default=ROOT / "data/maskd/default.yaml", help="maskd hyperparameters")
+    parser.add_argument("--mask-only", action="store_true", help="train mask module only")
 
     parser.add_argument("--data", type=str, default=ROOT / "data/coco128.yaml", help="dataset.yaml path")
     parser.add_argument("--hyp", type=str, default=ROOT / "data/hyps/hyp.scratch-low.yaml", help="hyperparameters path")
@@ -798,7 +886,7 @@ def main(opt, callbacks=Callbacks()):
 
     # Train
     if not opt.evolve:
-        train(opt.hyp, opt, device, callbacks)
+        train(opt.hyp, opt.maskd_hyp, opt, device, callbacks)
 
     # Evolve hyperparameters (optional)
     else:

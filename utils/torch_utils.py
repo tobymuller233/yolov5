@@ -874,3 +874,7 @@ def empty_like(x):
     return (
         torch.empty_like(x, dtype=torch.float32) if isinstance(x, torch.Tensor) else np.empty_like(x, dtype=np.float32)
     )
+
+def eval_norm(model):       # eval_norm(model)
+    for n, m in model.named_modules():
+        m.eval()

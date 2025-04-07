@@ -1,8 +1,8 @@
-path: ./datasets
+path: ./datasets/debug
 train:
-  - SCUT_HEAD_A/train/images
+  - images
 val:
-  - SCUT_HEAD_B/val/images
+  - images
 
 names: 
   0: head

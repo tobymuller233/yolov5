@@ -1,6 +1,7 @@
 import math
 import torch
 import torch.nn as nn
+from datetime import datetime
 
 
 def dice_coeff(inputs, eps=1e-12):
@@ -150,7 +151,7 @@ class MaskModules(nn.Module):
         return out
 
 class Mask_Loss:
-    def __init__(self, teacher_model, hyp, maskmodules=MaskModules()):  # model must be de-paralleled
+    def __init__(self, teacher_model, hyp, maskmodules=MaskModules(), device="cpu"):  # model must be de-paralleled
 
         self.teacher_module_pairs = []
         self.remove_handle = []
@@ -161,30 +162,44 @@ class Mask_Loss:
 
         # self.mask_modules = nn.ModuleList([MaskModule(c, self.num_tokens, self.weight_mask)
         #                                        for c in self.channels])
-        self.mask_modules = maskmodules
+        for name, m in teacher_model.named_modules():
+            if name in hyp["maskd_modules"]:
+                self.teacher_module_pairs.append(m)
+        self.mask_modules = maskmodules.to(device)
+        self.div_losses = 0
 
     def register_hook(self):
         self.teacher_outputs = []
-
-        def make_layer_forward_hook(l):
+        self.index = 0
+        def make_layer_forward_hook():
             def forward_hook(m, input, output):
-                l.append(output)
+                out, maskloss = self.mask_modules.mask_modules[self.index](output)
+                self.div_losses += maskloss
+                self.index += 1
+                return out
 
             return forward_hook
 
         for mt in self.teacher_module_pairs:
-            self.remove_handle.append(mt.register_forward_hook(make_layer_forward_hook(self.teacher_outputs)))
+            self.remove_handle.append(mt.register_forward_hook(make_layer_forward_hook()))
 
     def get_loss(self):
-        assert len(self.teacher_outputs) == len(self.mask_modules.mask_modules) # ensure the same number of layers
+        # assert len(self.teacher_outputs) == len(self.mask_modules.mask_modules) # ensure the same number of layers
+        return self.div_losses
 
-        div_losses = 0
-        mask_out = self.mask_modules(self.teacher_outputs)
-        for masked_out, div_loss in mask_out:
-            div_losses += div_loss
-        self.teacher_outputs.clear()
-        return div_losses
-
+    def reset_loss(self):
+        self.index = 0
+        self.div_losses = 0
+        
     def remove_handle_(self):
         for rm in self.remove_handle:
             rm.remove()
+    
+    def save_checkpoint(self, iter, optimizer, loss, save_dir):
+        torch.save({
+            'iteration': iter,
+            'maskd_model': self.mask_modules.state_dict(),
+            'loss': loss,
+            'optimizer': optimizer.state_dict(),
+            'date': datetime.now().isoformat(),
+        }, save_dir)
