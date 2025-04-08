@@ -97,6 +97,8 @@ def run(
     half=False,  # use FP16 half-precision inference
     dnn=False,  # use OpenCV DNN for ONNX inference
     vid_stride=1,  # video frame-rate stride
+    maskd_hyp=None,
+    mask_weight=None
 ):
     """
     Runs YOLOv5 detection inference on various sources like images, videos, directories, streams, etc.
@@ -181,6 +183,14 @@ def run(
 
     # Run inference
     model.warmup(imgsz=(1 if pt or model.triton else bs, 3, *imgsz))  # warmup
+    if opt.maskd_hyp:
+        from models.maskd import MaskModule, MaskModules, Mask_Loss
+        import yaml
+
+        maskd_hyp = yaml.safe_load(open(opt.maskd_hyp, "r"))
+        maskmodules = MaskModules(maskd_hyp["maskd_tea_channels"], pretrained=opt.mask_weight).to(device)
+        mask_hook = Mask_Loss(model.model, maskd_hyp, maskmodules, device=device)
+        mask_hook.register_hook()
     seen, windows, dt = 0, [], (Profile(device=device), Profile(device=device), Profile(device=device))
     for path, im, im0s, vid_cap, s in dataset:
         with dt[0]:
@@ -205,6 +215,8 @@ def run(
                 pred = [pred, None]
             else:
                 pred = model(im, augment=augment, visualize=visualize)
+        if opt.maskd_hyp:
+            mask_hook.get_loss()
         # NMS
         with dt[2]:
             pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
@@ -400,6 +412,9 @@ def parse_opt():
     parser.add_argument("--half", action="store_true", help="use FP16 half-precision inference")
     parser.add_argument("--dnn", action="store_true", help="use OpenCV DNN for ONNX inference")
     parser.add_argument("--vid-stride", type=int, default=1, help="video frame-rate stride")
+
+    parser.add_argument("--maskd-hyp", type=str, default=None, help="Use hook to visualize masked feature maps")
+    parser.add_argument("--mask-weight", type=str, default=ROOT / "runs/debug/exp134/weights/maskmodule.pt", help="Path to the mask module weights")
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
     print_args(vars(opt))

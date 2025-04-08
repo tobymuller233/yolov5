@@ -95,7 +95,7 @@ from utils.torch_utils import (
     torch_distributed_zero_first,
     eval_norm,
 )
-from models.maskd import MasKDLoss, MaskModule, MaskModules, Mask_Loss
+from models.maskd import MasKDLoss, MaskModule, MaskModules, Mask_Loss, Distillation_Loss
 
 LOCAL_RANK = int(os.getenv("LOCAL_RANK", -1))  # https://pytorch.org/docs/stable/elastic/run.html
 RANK = int(os.getenv("RANK", -1))
@@ -205,6 +205,8 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
             hyp=hyp,
             logger=LOGGER,
             include=tuple(include_loggers),
+            mask=True,
+            maskd=True,
         )
 
         # Register actions
@@ -251,6 +253,8 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
         # LOGGER.info(f"Transferred {len(csd)}/{len(model.state_dict())} items from {weights}")  # report
     else:
         model = Model(cfg, ch=3, nc=nc, anchors=hyp.get("anchors")).to(device)  # create
+    m = model.model[-1]
+    m.maskd = False
     amp = check_amp(model)  # check AMP
 
 # create new -----------------------------------------------------------------------   
@@ -311,7 +315,7 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
 
     # EMA
     ema = ModelEMA(model) if RANK in {-1, 0} else None
-    ema = ModelEMA(mask_model) if RANK in {-1, 0} else None
+    ema_mask = ModelEMA(mask_model) if RANK in {-1, 0} else None
 
     # Resume
     best_fitness, start_epoch = 0.0, 0
@@ -439,6 +443,9 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
     LOGGER.info(f"Training mask module for {hyp['maskd_mask_trainiter']} iterations...")
     iter_num = 0
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
+        if opt.mask_weight:
+            LOGGER.info(f"Loading mask module from {opt.mask_weight}")
+            break
         callbacks.run("on_train_epoch_start")
         mloss = torch.zeros(3, device=device)  # mean losses
 
@@ -467,11 +474,11 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
                 if ni <= nw:
                     xi = [0, nw]
                     accumulate = max(1, np.interp(ni, xi, [1, nbs / batch_size]).round())
-                    # for j, x in enumerate(mask_optimizer.param_groups):
-                    #     # bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
-                    #     x["lr"] = np.interp(ni, xi, [hyp["warmup_bias_lr"] if j == 0 else 0.0, x["initial_lr"] * lf(epoch)])
-                    #     if "momentum" in x:
-                    #         x["momentum"] = np.interp(ni, xi, [hyp["warmup_momentum"], hyp["momentum"]])
+                    for j, x in enumerate(mask_optimizer.param_groups):
+                        # bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
+                        x["lr"] = np.interp(ni, xi, [hyp["warmup_bias_lr"] if j == 0 else 0.0, x["initial_lr"] * lf(epoch)])
+                        if "momentum" in x:
+                            x["momentum"] = np.interp(ni, xi, [hyp["warmup_momentum"], hyp["momentum"]])
                 
                 # Multi-scale
                 if targets is not None and opt.multi_scale:
@@ -513,6 +520,8 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
                     scaler.step(mask_optimizer)  # optimizer.step
                     scaler.update()
                     mask_optimizer.zero_grad()
+                    if ema_mask:
+                        ema_mask.update(mask_model)
                     last_opt_step = ni
 
                 if targets is None: # v8loader
@@ -528,7 +537,7 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
                         ("%11s" * 2 + "%11.4g" * 6)
                         % (f"{epoch}/{epochs - 1}", mem, *mloss, loss, targets.shape[0], imgs.shape[-1])
                     )
-                    callbacks.run("on_train_batch_end", model, ni, imgs, targets, paths, list(mloss))
+                    callbacks.run("on_train_batch_end", model, ni, imgs, targets, paths, list(mloss, maskd_loss))
                     if callbacks.stop_training:
                         return
                 mask_scheduler.step()
@@ -539,10 +548,21 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
                 mask_loss.save_checkpoint(iter=iter_num, optimizer=mask_optimizer, loss=loss, save_dir=w / "maskmodule.pt")
                 LOGGER.info(f"Mask module saved to {w / 'maskmodule.pt'}")
                 continue
-            continue
         
         if opt.mask_only:
             return
+    
+    
+    if opt.mask_weight:
+        dist_loss = Distillation_Loss(model, t_model, opt.mask_weight, hyp, device=device)
+    else:
+        LOGGER.info(f"Using mask module from {w / 'maskmodule.pt'}")
+        dist_loss = Distillation_Loss(model, t_model, w/"maskmodule.pt", hyp, device=device)
+    LOGGER.info(f"Distillating model...")
+    for epoch in range(start_epoch, epochs):
+        callbacks.run("on_train_epoch_start")
+        mloss = torch.zeros(3, device=device)  # mean losses
+        mdistloss = torch.zeros(1, device=device)    # mean distillation loss
         # distillation
         model.train()
         # Update image weights (optional, single-GPU only)
@@ -558,11 +578,13 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
         if RANK != -1:
             train_loader.sampler.set_epoch(epoch)
         pbar = enumerate(train_loader)
-        LOGGER.info(("\n" + "%11s" * 7) % ("Epoch", "GPU_mem", "box_loss", "obj_loss", "cls_loss", "Instances", "Size"))
+        LOGGER.info(("\n" + "%11s" * 8) % ("Epoch", "GPU_mem", "box_loss", "obj_loss", "cls_loss", "maskd_loss", "Instances", "Size"))
         if RANK in {-1, 0}:
             pbar = tqdm(pbar, total=nb, bar_format=TQDM_BAR_FORMAT)  # progress bar
         optimizer.zero_grad()
+        dist_loss.register_hook()
         for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
+            dist_loss.reset()
             train_batch = imgs
             callbacks.run("on_train_batch_start")
             ni = i + nb * epoch  # number integrated batches (since train start)
@@ -589,24 +611,32 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
                     imgs = nn.functional.interpolate(imgs, size=ns, mode="bilinear", align_corners=False)
 
             # Forward
-            with torch.cuda.amp.autocast(amp):
-                if targets is not None: # not v8loader
-                    pred = model(imgs)  # forward
-                    loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
-                else:   # V8 LOADER
-                    train_batch["img"] = train_batch["img"].to(device, non_blocking=True).float() / 255
-                    if opt.multi_scale:
-                        sz = random.randrange(int(imgsz * 0.5), int(imgsz * 1.5) + gs) // gs * gs  # size
-                        sf = sz / max(train_batch["img"].shape[2:])  # scale factor
-                        if sf != 1:
-                            ns = [math.ceil(x * sf / gs) * gs for x in train_batch["img"].shape[2:]]
-                            train_batch["img"] = nn.functional.interpolate(train_batch["img"], size=ns, mode="bilinear", align_corners=False)
-                    pred = model(train_batch["img"])
-                    loss, loss_items = compute_loss(pred, train_batch)
-                if RANK != -1:
-                    loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
-                if opt.quad:
-                    loss *= 4.0
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with torch.cuda.amp.autocast(amp):
+                    if targets is not None: # not v8loader
+                        pred = model(imgs)  # forward
+                        with torch.no_grad():
+                            t_pred = t_model(imgs)
+                        loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                    else:   # V8 LOADER
+                        train_batch["img"] = train_batch["img"].to(device, non_blocking=True).float() / 255
+                        if opt.multi_scale:
+                            sz = random.randrange(int(imgsz * 0.5), int(imgsz * 1.5) + gs) // gs * gs  # size
+                            sf = sz / max(train_batch["img"].shape[2:])  # scale factor
+                            if sf != 1:
+                                ns = [math.ceil(x * sf / gs) * gs for x in train_batch["img"].shape[2:]]
+                                train_batch["img"] = nn.functional.interpolate(train_batch["img"], size=ns, mode="bilinear", align_corners=False)
+                        pred = model(train_batch["img"])
+                        with torch.no_grad():
+                            t_pred = t_model(train_batch["img"])
+                        loss, loss_items = compute_loss(pred, train_batch)
+                    if RANK != -1:
+                        loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
+                    if opt.quad:
+                        loss *= 4.0
+                    distloss = dist_loss.get_loss()
+                    loss += distloss
 
             # Backward
             scaler.scale(loss).backward()
@@ -630,12 +660,13 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
             # Log
             if RANK in {-1, 0}:
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
+                mdistloss = (mdistloss * i + distloss) / (i + 1)  # update mean losses
                 mem = f"{torch.cuda.memory_reserved() / 1e9 if torch.cuda.is_available() else 0:.3g}G"  # (GB)
                 pbar.set_description(
-                    ("%11s" * 2 + "%11.4g" * 5)
-                    % (f"{epoch}/{epochs - 1}", mem, *mloss, targets.shape[0], imgs.shape[-1])
+                    ("%11s" * 2 + "%11.4g" * 6)
+                    % (f"{epoch}/{epochs - 1}", mem, *mloss, mdistloss, targets.shape[0], imgs.shape[-1])
                 )
-                callbacks.run("on_train_batch_end", model, ni, imgs, targets, paths, list(mloss))
+                callbacks.run("on_train_batch_end", model, ni, imgs, targets, paths, list(mloss) + list(mdistloss))
                 if callbacks.stop_training:
                     return
             # end batch ------------------------------------------------------------------------------------------------
@@ -643,7 +674,7 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
         # Scheduler
         lr = [x["lr"] for x in optimizer.param_groups]  # for loggers
         scheduler.step()
-
+        dist_loss.remove_handle_()
         if RANK in {-1, 0}:
             # mAP
             callbacks.run("on_train_epoch_end", epoch=epoch)
@@ -669,7 +700,7 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
             stop = stopper(epoch=epoch, fitness=fi)  # early stop check
             if fi > best_fitness:
                 best_fitness = fi
-            log_vals = list(mloss) + list(results) + lr
+            log_vals = list(mloss) + list(mdistloss) + list(results) + lr
             callbacks.run("on_fit_epoch_end", log_vals, epoch, best_fitness, fi)
 
             # Save model
@@ -729,7 +760,7 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
                         compute_loss=compute_loss,
                     )  # val best model with plots
                     if is_coco:
-                        callbacks.run("on_fit_epoch_end", list(mloss) + list(results) + lr, epoch, best_fitness, fi)
+                        callbacks.run("on_fit_epoch_end", list(mloss) + list(mdistloss) + list(results) + lr, epoch, best_fitness, fi)
 
         callbacks.run("on_train_end", last, best, epoch, results)
 
@@ -765,6 +796,7 @@ def parse_opt(known=False):
     parser.add_argument("--teacher-weights", type=str, default=None, help="teacher weights path")
     parser.add_argument("--maskd-hyp", type=str, default=ROOT / "data/maskd/default.yaml", help="maskd hyperparameters")
     parser.add_argument("--mask-only", action="store_true", help="train mask module only")
+    parser.add_argument("--mask-weight", type=str, default=None, help="mask module weight path")
 
     parser.add_argument("--data", type=str, default=ROOT / "data/coco128.yaml", help="dataset.yaml path")
     parser.add_argument("--hyp", type=str, default=ROOT / "data/hyps/hyp.scratch-low.yaml", help="hyperparameters path")

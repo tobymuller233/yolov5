@@ -329,7 +329,7 @@ class BaseModel(nn.Module):
             x = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
             if visualize:
-                feature_visualization(x, m.type, m.i, save_dir=visualize)
+                feature_visualization(x, m.type, m.i, n=4, save_dir=visualize)
         return x
 
     def _profile_one_layer(self, m, x, dt):
@@ -604,6 +604,8 @@ def parse_model(d, ch):
             c1, c2 = ch[f], args[0]
             if no and c2 != no:  # if not output
                 c2 = make_divisible(c2 * gw, ch_mul)
+            elif no is None:
+                c2 = make_divisible(c2 * gw, ch_mul)  # number of channels
 
             args = [c1, c2, *args[1:]]
             if m in {BottleneckCSP, C3, C3TR, C3Ghost, C3x, C2f, C3k2}:

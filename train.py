@@ -24,6 +24,7 @@ import time
 from copy import deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
+import warnings
 
 try:
     import comet_ml  # must be imported before torch (if installed)
@@ -225,16 +226,18 @@ def train(hyp, opt, device, callbacks):
         with torch_distributed_zero_first(LOCAL_RANK):
             weights = attempt_download(weights)  # download if not found locally
         ckpt = torch.load(weights, map_location="cpu")  # load checkpoint to CPU to avoid CUDA memory leak
-        model = Model(cfg or ckpt["model"].yaml, ch=3, nc=nc, anchors=hyp.get("anchors")).to(device)  # create
-        exclude = ["anchor"] if (cfg or hyp.get("anchors")) and not resume else []  # exclude keys
-        csd = ckpt["model"].float().state_dict()  # checkpoint state_dict as FP32
-        csd = intersect_dicts(csd, model.state_dict(), exclude=exclude)  # intersect
-        model.load_state_dict(csd, strict=False)  # load
-        LOGGER.info(f"Transferred {len(csd)}/{len(model.state_dict())} items from {weights}")  # report
+        model = ckpt["model"].float().to(device)
+        # model = Model(cfg or ckpt["model"].yaml, ch=3, nc=nc, anchors=hyp.get("anchors")).to(device)  # create
+        # exclude = ["anchor"] if (cfg or hyp.get("anchors")) and not resume else []  # exclude keys
+        # csd = ckpt["model"].float().state_dict()  # checkpoint state_dict as FP32
+        # csd = intersect_dicts(csd, model.state_dict(), exclude=exclude)  # intersect
+        # model.load_state_dict(csd, strict=False)  # load
+        # LOGGER.info(f"Transferred {len(csd)}/{len(model.state_dict())} items from {weights}")  # report
     else:
         model = Model(cfg, ch=3, nc=nc, anchors=hyp.get("anchors")).to(device)  # create
     amp = check_amp(model)  # check AMP
-
+    m = model.model[-1]
+    m.maskd = False
     # Freeze
     freeze = [f"model.{x}." for x in (freeze if len(freeze) > 1 else range(freeze[0]))]  # layers to freeze
     for k, v in model.named_parameters():
@@ -278,7 +281,7 @@ def train(hyp, opt, device, callbacks):
     if pretrained:
         if resume:
             best_fitness, start_epoch, epochs = smart_resume(ckpt, optimizer, ema, weights, epochs, resume)
-        del ckpt, csd
+        del ckpt
 
     # DP mode
     if cuda and RANK == -1 and torch.cuda.device_count() > 1:
@@ -432,24 +435,26 @@ def train(hyp, opt, device, callbacks):
                     imgs = nn.functional.interpolate(imgs, size=ns, mode="bilinear", align_corners=False)
 
             # Forward
-            with torch.cuda.amp.autocast(amp):
-                if targets is not None: # not v8loader
-                    pred = model(imgs)  # forward
-                    loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
-                else:   # V8 LOADER
-                    train_batch["img"] = train_batch["img"].to(device, non_blocking=True).float() / 255
-                    if opt.multi_scale:
-                        sz = random.randrange(int(imgsz * 0.5), int(imgsz * 1.5) + gs) // gs * gs  # size
-                        sf = sz / max(train_batch["img"].shape[2:])  # scale factor
-                        if sf != 1:
-                            ns = [math.ceil(x * sf / gs) * gs for x in train_batch["img"].shape[2:]]
-                            train_batch["img"] = nn.functional.interpolate(train_batch["img"], size=ns, mode="bilinear", align_corners=False)
-                    pred = model(train_batch["img"])
-                    loss, loss_items = compute_loss(pred, train_batch)
-                if RANK != -1:
-                    loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
-                if opt.quad:
-                    loss *= 4.0
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with torch.cuda.amp.autocast(amp):
+                    if targets is not None: # not v8loader
+                        pred = model(imgs)  # forward
+                        loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                    else:   # V8 LOADER
+                        train_batch["img"] = train_batch["img"].to(device, non_blocking=True).float() / 255
+                        if opt.multi_scale:
+                            sz = random.randrange(int(imgsz * 0.5), int(imgsz * 1.5) + gs) // gs * gs  # size
+                            sf = sz / max(train_batch["img"].shape[2:])  # scale factor
+                            if sf != 1:
+                                ns = [math.ceil(x * sf / gs) * gs for x in train_batch["img"].shape[2:]]
+                                train_batch["img"] = nn.functional.interpolate(train_batch["img"], size=ns, mode="bilinear", align_corners=False)
+                        pred = model(train_batch["img"])
+                        loss, loss_items = compute_loss(pred, train_batch)
+                    if RANK != -1:
+                        loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
+                    if opt.quad:
+                        loss *= 4.0
 
             # Backward
             scaler.scale(loss).backward()

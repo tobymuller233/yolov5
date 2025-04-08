@@ -73,7 +73,7 @@ class MaskModule(nn.Module):
 
 class MasKDLoss(nn.Module):
 
-    def __init__(self, channels, num_tokens=6, weight_mask=True, custom_mask=True, custom_mask_warmup=1000, pretrained=None, loss_weight=1.):
+    def __init__(self, channels_s, channels_t, num_tokens=6, weight_mask=True, custom_mask=True, custom_mask_warmup=1000, pretrained=None, loss_weight=1.):
         super().__init__()
         self.loss_weight = loss_weight
         self.weight_mask = weight_mask
@@ -81,10 +81,19 @@ class MasKDLoss(nn.Module):
         self.custom_mask_warmup = custom_mask_warmup
 
         self.mask_modules = nn.ModuleList([
-            MaskModule(channels=c, num_tokens=num_tokens, weight_mask=weight_mask) for c in channels]
+            MaskModule(channels=c, num_tokens=num_tokens, weight_mask=weight_mask) for c in channels_t]
         )
 
+        self.align_modules = nn.ModuleList([
+            nn.Conv2d(channels_s[i], channels_t[i], kernel_size=1, stride=1, padding=0)
+            for i in range(len(channels_s))
+        ])
+
         self.init_weights(pretrained)
+        for n, p in self.mask_modules.named_parameters():
+            p.requires_grad = False
+        for n, p in self.align_modules.named_parameters():
+            p.requires_grad = True
         self._iter = 0
 
     def init_weights(self, pretrained=None):
@@ -93,10 +102,10 @@ class MasKDLoss(nn.Module):
         # ckpt = _load_checkpoint(pretrained, map_location='cpu')
         ckpt = torch.load(pretrained, map_location='cpu')
         state_dict = {}
-        for k, v in ckpt['state_dict'].items():
+        for k, v in ckpt['maskd_model'].items():
             if 'mask_modules' in k:
                 state_dict[k[k.find('mask_modules'):]] = v
-        self.load_state_dict(state_dict, strict=True)
+        self.load_state_dict(state_dict, strict=False)
 
     def forward(self, y_s_list, y_t_list):
         if not isinstance(y_s_list, (tuple, list)):
@@ -105,7 +114,8 @@ class MasKDLoss(nn.Module):
         assert len(y_s_list) == len(y_t_list) == len(self.mask_modules)
 
         losses = []
-        for y_s, y_t, mask_module in zip(y_s_list, y_t_list, self.mask_modules):
+        for y_s, y_t, mask_module, align_module in zip(y_s_list, y_t_list, self.mask_modules, self.align_modules):
+            y_s = align_module(y_s)  # [N, C, H, W]
             # predict the masks
             mask = mask_module.forward_mask(y_t)
             if self.custom_mask and self._iter >= self.custom_mask_warmup:
@@ -136,12 +146,19 @@ class MasKDLoss(nn.Module):
         return self.loss_weight * loss
 
 class MaskModules(nn.Module):
-    def __init__(self, channels=[], num_tokens=6, weight_mask=True):
+    def __init__(self, channels=[], num_tokens=6, weight_mask=True, pretrained=None):
         super().__init__()
         self.weight_mask = weight_mask
         self.mask_modules = nn.ModuleList([
             MaskModule(channels=c, num_tokens=num_tokens, weight_mask=weight_mask) for c in channels]
         )
+        if pretrained:
+            weight = torch.load(pretrained, map_location='cpu')
+            state_dict = {}
+            for k, v in weight['maskd_model'].items():
+                if 'mask_modules' in k:
+                    state_dict[k[k.find('mask_modules'):]] = v
+            self.load_state_dict(state_dict, strict=False)
 
     def forward(self, x):
         out = []
@@ -151,7 +168,7 @@ class MaskModules(nn.Module):
         return out
 
 class Mask_Loss:
-    def __init__(self, teacher_model, hyp, maskmodules=MaskModules(), device="cpu"):  # model must be de-paralleled
+    def __init__(self, teacher_model, hyp, maskmodules=MaskModules(), device="cpu", pretrained=None):  # model must be de-paralleled
 
         self.teacher_module_pairs = []
         self.remove_handle = []
@@ -169,7 +186,6 @@ class Mask_Loss:
         self.div_losses = 0
 
     def register_hook(self):
-        self.teacher_outputs = []
         self.index = 0
         def make_layer_forward_hook():
             def forward_hook(m, input, output):
@@ -203,3 +219,55 @@ class Mask_Loss:
             'optimizer': optimizer.state_dict(),
             'date': datetime.now().isoformat(),
         }, save_dir)
+
+class Distillation_Loss:
+    def __init__(self, stu_model, tea_model, pretrained_mask, hyp, device="cpu"):
+        self.student_modules = []
+        self.teacher_modules = []
+        self.remove_handle = []
+
+        self.channels_s = hyp["maskd_stu_channels"]
+        self.channels_t = hyp["maskd_tea_channels"]
+        
+        for name, m in stu_model.named_modules():
+            if name in hyp["maskd_modules"]:
+                self.student_modules.append(m)
+        for name, m in tea_model.named_modules():
+            if name in hyp["maskd_modules"]:
+                self.teacher_modules.append(m)
+        
+        self.Distloss = MasKDLoss(self.channels_s, self.channels_t,
+                                  num_tokens=hyp["maskd_ntokens"],
+                                  weight_mask=hyp["maskd_weightmask"],
+                                  custom_mask=hyp["maskd_custom_mask"],
+                                  custom_mask_warmup=hyp["maskd_custom_mask_warmup"],
+                                  pretrained=pretrained_mask,).to(device)
+    
+    def register_hook(self):
+        self.student_outputs = []
+        self.teacher_outputs = []
+
+        def make_layer_forward_hook(l):
+            def forward_hook(m, input, output):
+                l.append(output)
+
+            return forward_hook
+
+        for tm, sm in zip(self.teacher_modules, self.student_modules):
+            self.remove_handle.append(tm.register_forward_hook(make_layer_forward_hook(self.teacher_outputs)))
+            self.remove_handle.append(sm.register_forward_hook(make_layer_forward_hook(self.student_outputs)))
+    
+    def get_loss(self):
+        # assert len(self.teacher_outputs) == len(self.student_outputs) # ensure the same number of layers
+        loss = self.Distloss(self.student_outputs, self.teacher_outputs)
+        self.student_outputs.clear()
+        self.teacher_outputs.clear()
+        return loss
+
+    def reset(self):
+        self.student_outputs.clear()
+        self.teacher_outputs.clear()
+    
+    def remove_handle_(self):
+        for rm in self.remove_handle:
+            rm.remove()
