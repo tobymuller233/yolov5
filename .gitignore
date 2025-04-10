@@ -34,6 +34,8 @@ data/images/*
 !data/images/zidane.jpg
 !data/images/bus.jpg
 !data/*.sh
+!data/maskd
+!data/fgmask
 
 results*.csv
 
@@ -256,3 +258,6 @@ com_crashlytics_export_strings.xml
 crashlytics.properties
 crashlytics-build.properties
 fabric.properties
+
+datasets
+weights
