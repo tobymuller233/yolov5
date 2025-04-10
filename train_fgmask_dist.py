@@ -1,19 +1,3 @@
-# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
-"""
-Train a YOLOv5 model on a custom dataset. Models and datasets download automatically from the latest YOLOv5 release.
-
-Usage - Single-GPU training:
-    $ python train.py --data coco128.yaml --weights yolov5s.pt --img 640  # from pretrained (recommended)
-    $ python train.py --data coco128.yaml --weights '' --cfg yolov5s.yaml --img 640  # from scratch
-
-Usage - Multi-GPU DDP training:
-    $ python -m torch.distributed.run --nproc_per_node 4 --master_port 1 train.py --data coco128.yaml --weights yolov5s.pt --img 640 --device 0,1,2,3
-
-Models:     https://github.com/ultralytics/yolov5/tree/master/models
-Datasets:   https://github.com/ultralytics/yolov5/tree/master/data
-Tutorial:   https://docs.ultralytics.com/yolov5/tutorials/train_custom_data
-"""
-
 import argparse
 import math
 import os
@@ -81,7 +65,7 @@ from utils.general import (
 )
 from utils.loggers import LOGGERS, Loggers
 from utils.loggers.comet.comet_utils import check_comet_resume
-from utils.loss import ComputeLoss, v8DetectionLoss
+from utils.loss import ComputeLoss, v8DetectionLoss, imitation_loss
 from utils.metrics import fitness
 from utils.plots import plot_evolve
 from utils.torch_utils import (
@@ -94,6 +78,8 @@ from utils.torch_utils import (
     smart_resume,
     torch_distributed_zero_first,
 )
+
+from utils.fgmask import Fgmask_Hook
 
 LOCAL_RANK = int(os.getenv("LOCAL_RANK", -1))  # https://pytorch.org/docs/stable/elastic/run.html
 RANK = int(os.getenv("RANK", -1))
@@ -161,6 +147,9 @@ def train(hyp, opt, device, callbacks):
     if isinstance(hyp, str):
         with open(hyp, errors="ignore") as f:
             hyp = yaml.safe_load(f)  # load hyps dict
+        if opt.teacher_weights:
+            with open(opt.fgmask_hyp, errors="ignore") as f:
+                fgmask_hyp = yaml.safe_load(f)  # load hyps dict
     LOGGER.info(colorstr("hyperparameters: ") + ", ".join(f"{k}={v}" for k, v in hyp.items()))
 
     # for anchor-free head
@@ -238,6 +227,12 @@ def train(hyp, opt, device, callbacks):
     amp = check_amp(model)  # check AMP
     m = model.model[-1]
     m.maskd = False
+
+    if opt.teacher_weights:
+        with torch_distributed_zero_first(LOCAL_RANK):
+            t_weights = attempt_download(opt.teacher_weights)  # download if not found locally
+        t_ckpt = torch.load(t_weights, map_location="cpu")  # load checkpoint to CPU to avoid CUDA memory leak
+        t_model = t_ckpt["model"].float().to(device)
     # Freeze
     freeze = [f"model.{x}." for x in (freeze if len(freeze) > 1 else range(freeze[0]))]  # layers to freeze
     for k, v in model.named_parameters():
@@ -290,10 +285,14 @@ def train(hyp, opt, device, callbacks):
             "See Multi-GPU Tutorial at https://docs.ultralytics.com/yolov5/tutorials/multi_gpu_training to get started."
         )
         model = torch.nn.DataParallel(model)
+        if opt.teacher_weights:
+            t_model = torch.nn.DataParallel(t_model)  
 
     # SyncBatchNorm
     if opt.sync_bn and cuda and RANK != -1:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
+        if opt.teacher_weights:
+            t_model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(t_model).to(device)
         LOGGER.info("Using SyncBatchNorm()")
 
     # Trainloader
@@ -348,6 +347,8 @@ def train(hyp, opt, device, callbacks):
     # DDP mode
     if cuda and RANK != -1:
         model = smart_DDP(model)
+        if opt.teacher_weights:
+            t_model = smart_DDP(t_model)
 
     # Model attributes
     nl = de_parallel(model).model[-1].nl  # number of detection layers (to scale hyps)
@@ -360,6 +361,15 @@ def train(hyp, opt, device, callbacks):
     model.hyp = hyp  # attach hyperparameters to model
     model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc  # attach class weights
     model.names = names
+
+    if opt.teacher_weights:
+        t_model.nc = nc
+        t_model.hyp = hyp
+        t_model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc
+        t_model.names = names
+        
+        for n, p in t_model.named_parameters():
+            p.requires_grad = False
 
     # Start training
     t0 = time.time()
@@ -386,10 +396,30 @@ def train(hyp, opt, device, callbacks):
         f"Logging results to {colorstr('bold', save_dir)}\n"
         f"Starting training for {epochs} epochs..."
     )
+    
+    # fgmask hook
+    if opt.teacher_weights:
+        fgmask_hook = Fgmask_Hook(t_model, model, fgmask_hyp, t_model.model[-1].anchors, device=device)
+        fgmask_hook.register_hook()
+        stu_channels = fgmask_hyp["fgmask_stu_channels"]
+        tea_channels = fgmask_hyp["fgmask_tea_channels"]
+        model.eval()
+        t_model.eval()
+        dump_input = torch.zeros((1, 3, imgsz, imgsz), device=device)
+        s_pred = model(dump_input)
+        t_pred = t_model(dump_input)
+        student_adaptive_layer = nn.ModuleList(
+            nn.Sequential(nn.Conv2d(student_channel, teacher_channel, 3, padding=1, stride=int(student_out.shape[2] / teacher_out.shape[2])), 
+                          nn.ReLU()) for student_channel, teacher_channel, student_out, teacher_out in zip(stu_channels, tea_channels, fgmask_hook.student_outputs, fgmask_hook.teacher_outputs)
+        ).to(device)
+        fgmask_hook.clear_outputs()
+
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         callbacks.run("on_train_epoch_start")
         model.train()
 
+        if opt.teacher_weights:
+            t_model.eval()
         # Update image weights (optional, single-GPU only)
         if opt.image_weights:
             cw = model.class_weights.cpu().numpy() * (1 - maps) ** 2 / nc  # class weights
@@ -409,6 +439,8 @@ def train(hyp, opt, device, callbacks):
             pbar = tqdm(pbar, total=nb, bar_format=TQDM_BAR_FORMAT)  # progress bar
         optimizer.zero_grad()
         for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
+            if opt.teacher_weights:
+                fgmask_hook.clear_outputs()
             train_batch = imgs
             callbacks.run("on_train_batch_start")
             ni = i + nb * epoch  # number integrated batches (since train start)
@@ -439,8 +471,24 @@ def train(hyp, opt, device, callbacks):
                 warnings.simplefilter("ignore")
                 with torch.cuda.amp.autocast(amp):
                     if targets is not None: # not v8loader
-                        pred = model(imgs)  # forward
-                        loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                        if opt.teacher_weights:
+                            pred = model(imgs)
+                            t_pred = t_model(imgs)
+                            t_features = fgmask_hook.teacher_outputs
+                            s_features = fgmask_hook.student_outputs
+                            t_masks = fgmask_hook.get_mask(targets.to(device))
+                            loss, loss_items = compute_loss(pred, targets.to(device))
+                            fgmask_loss = 0
+                            for i, (t_feature, s_feature, t_mask) in enumerate(zip(t_features, s_features, t_masks)):
+                                t_feature = t_feature.detach()
+                                s_feature = student_adaptive_layer[i](s_feature)
+                                t_mask = t_mask.detach()
+                                fgmask_loss += imitation_loss(t_feature, s_feature, t_mask) * 0.01
+                            loss += fgmask_loss * batch_size
+                            pass
+                        else:
+                            pred = model(imgs)  # forward
+                            loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                     else:   # V8 LOADER
                         train_batch["img"] = train_batch["img"].to(device, non_blocking=True).float() / 255
                         if opt.multi_scale:
@@ -610,6 +658,9 @@ def parse_opt(known=False):
     parser = argparse.ArgumentParser()
     parser.add_argument("--weights", type=str, default=ROOT / "yolov5s.pt", help="initial weights path")
     parser.add_argument("--cfg", type=str, default="", help="model.yaml path")
+    parser.add_argument("--teacher-weights", type=str, default=ROOT / "weights/yolov5l.pt", help="teacher weights path")
+    parser.add_argument("--fgmask-hyp", type=str, default=ROOT / "data/hyps/fgmask/default.yam", help="fgmask hyperparameters path")
+
     parser.add_argument("--data", type=str, default=ROOT / "data/coco128.yaml", help="dataset.yaml path")
     parser.add_argument("--hyp", type=str, default=ROOT / "data/hyps/hyp.scratch-low.yaml", help="hyperparameters path")
     parser.add_argument("--epochs", type=int, default=100, help="total training epochs")

@@ -1,0 +1,20 @@
+# mask training
+maskd_channels: [256, 256, 256, 256, 256] 
+maskd_ntokens: 6
+maskd_weightmask: True
+maskd_mask_trainiter: 2000  # by iteration
+maskd_mask_lr: {
+  "policy": "CosineAnnealing",
+  "base_lr": 0.001,
+  "min_lr": 1e-6,
+}
+maskd_mask_optimizer: {
+  "type": "Adam",
+  "lr": 0.01,
+  "weight_decay": 0.1,
+}
+
+# distillation
+maskd_stuwarmup: 1    # by epoch
+maskd_masklossweight: 1.0
+maskd_reglossweight: 1.0

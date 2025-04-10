@@ -1,0 +1,8 @@
+path: ./datasets/debug
+train:
+  - images
+val:
+  - images
+
+names: 
+  0: head

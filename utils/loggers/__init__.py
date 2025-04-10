@@ -78,7 +78,7 @@ def _json_default(value):
 class Loggers:
     """Initializes and manages various logging utilities for tracking YOLOv5 training and validation metrics."""
 
-    def __init__(self, save_dir=None, weights=None, opt=None, hyp=None, logger=None, include=LOGGERS):
+    def __init__(self, save_dir=None, weights=None, opt=None, hyp=None, logger=None, include=LOGGERS, mask=False, maskd=False):
         """Initializes loggers for YOLOv5 training and validation metrics, paths, and options."""
         self.save_dir = save_dir
         self.weights = weights
@@ -102,6 +102,10 @@ class Loggers:
             "x/lr1",
             "x/lr2",
         ]  # params
+        # if mask:
+        #     self.keys.insert(3, "train/mask_loss")
+        if maskd:
+            self.keys.insert(3, "train/maskd_loss")
         self.best_keys = ["best/epoch", "best/precision", "best/recall", "best/mAP_0.5", "best/mAP_0.5:0.95"]
         for k in LOGGERS:
             setattr(self, k, None)  # init empty logger dictionary
@@ -193,7 +197,7 @@ class Loggers:
 
     def on_train_batch_end(self, model, ni, imgs, targets, paths, vals):
         """Logs training batch end events, plots images, and updates external loggers with batch-end data."""
-        log_dict = dict(zip(self.keys[:3], vals))
+        log_dict = dict(zip(self.keys[:len(vals)], vals))
         # Callback runs on train batch end
         # ni: number integrated batches (since train start)
         if self.plots:

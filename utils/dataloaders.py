@@ -175,6 +175,7 @@ def create_dataloader(
     prefix="",
     shuffle=False,
     seed=0,
+    v8loader=False,
 ):
     """Creates and returns a configured DataLoader instance for loading and processing image datasets."""
     if rect and shuffle:
@@ -195,6 +196,7 @@ def create_dataloader(
             image_weights=image_weights,
             prefix=prefix,
             rank=rank,
+            v8loader=v8loader,
         )
 
     batch_size = min(batch_size, len(dataset))
@@ -557,6 +559,7 @@ class LoadImagesAndLabels(Dataset):
         prefix="",
         rank=-1,
         seed=0,
+        v8loader=False,
     ):
         """Initializes the YOLOv5 dataset loader, handling images and their labels, caching, and preprocessing."""
         self.img_size = img_size
@@ -569,7 +572,8 @@ class LoadImagesAndLabels(Dataset):
         self.stride = stride
         self.path = path
         self.albumentations = Albumentations(size=img_size) if augment else None
-
+        self.v8loader = v8loader
+        
         try:
             f = []  # image files
             for p in path if isinstance(path, list) else [path]:
@@ -776,16 +780,21 @@ class LoadImagesAndLabels(Dataset):
         hyp = self.hyp
         if mosaic := self.mosaic and random.random() < hyp["mosaic"]:
             # Load mosaic
-            img, labels = self.load_mosaic(index)
+            img, labels, ori_shape = self.load_mosaic(index)
             shapes = None
+            resized_shape = img.shape[:2]
+            pad = (0, 0)
+            
 
             # MixUp augmentation
             if random.random() < hyp["mixup"]:
-                img, labels = mixup(img, labels, *self.load_mosaic(random.choice(self.indices)))
+                img, labels = mixup(img, labels, *self.load_mosaic(random.choice(self.indices))[:2])
 
-        else:
+        else:   # not yet modified
             # Load image
             img, (h0, w0), (h, w) = self.load_image(index)
+            ori_shape = (h0, w0)
+            resized_shape = (h, w)
 
             # Letterbox
             shape = self.batch_shapes[self.batch[index]] if self.rect else self.img_size  # final letterboxed shape
@@ -833,7 +842,7 @@ class LoadImagesAndLabels(Dataset):
 
             # Cutouts
             # labels = cutout(img, labels, p=0.5)
-            # nl = len(labels)  # update after cutout
+            # nl = len(labels)  # update after fcutout
 
         labels_out = torch.zeros((nl, 6))
         if nl:
@@ -842,8 +851,22 @@ class LoadImagesAndLabels(Dataset):
         # Convert
         img = img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
         img = np.ascontiguousarray(img)
-
-        return torch.from_numpy(img), labels_out, self.im_files[index], shapes
+        img_tensor = torch.from_numpy(img)
+        if not self.v8loader:
+            return torch.from_numpy(img), labels_out, self.im_files[index], shapes
+        
+        return_batch = {
+            "im_file": self.im_files[index],
+            "ori_shape": ori_shape,
+            "resize_shape": resized_shape,
+            "img": img_tensor,
+            "cls": labels_out[:, 1][:, None],
+            "bboxes": labels_out[:, 2:6],
+            "batch_idx": torch.zeros(nl),
+            "pad": pad,
+        }
+        return return_batch
+        
 
     def load_image(self, i):
         """
@@ -882,6 +905,7 @@ class LoadImagesAndLabels(Dataset):
         s = self.img_size
         yc, xc = (int(random.uniform(-x, 2 * s + x)) for x in self.mosaic_border)  # mosaic center x, y
         indices = [index] + random.choices(self.indices, k=3)  # 3 additional image indices
+        ori_shape = self.load_image(0)[1]
         random.shuffle(indices)
         for i, index in enumerate(indices):
             # Load image
@@ -934,7 +958,7 @@ class LoadImagesAndLabels(Dataset):
             border=self.mosaic_border,
         )  # border to remove
 
-        return img4, labels4
+        return img4, labels4, ori_shape
 
     def load_mosaic9(self, index):
         """Loads 1 image + 8 random images into a 9-image mosaic for augmented YOLOv5 training, returning labels and
@@ -1020,7 +1044,33 @@ class LoadImagesAndLabels(Dataset):
     @staticmethod
     def collate_fn(batch):
         """Batches images, labels, paths, and shapes, assigning unique indices to targets in merged label tensor."""
+        if isinstance(batch[0], dict):
+            # im = [item["img"] for item in batch]
+            # label = [item["label"] for item in batch]
+            # path = [item["im_file"] for item in batch]
+            # resized_shapes = [item["resized_shape"] for item in batch]
+            # ori_shapes = [item["ori_shape"] for item in batch]
+            # bboxes = [item["bboxes"] for item in batch]
+            # batch_idx = [item["batch_idx"] for item in batch]
+            new_batch = {}
+            keys = batch[0].keys()
+            values = list(zip(*[list(b.values()) for b in batch]))
+            for i, k in enumerate(keys):
+                value = values[i]
+                if k in {"img"}:
+                    value = torch.stack(value, 0)
+                if k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb"}:
+                    value = torch.cat(value, 0)
+                new_batch[k] = value
+            new_batch["batch_idx"] = list(new_batch["batch_idx"])
+            for i in range(len(new_batch["batch_idx"])):
+                new_batch["batch_idx"][i] += i  # add target image index for build_targets()
+            new_batch["batch_idx"] = torch.cat(new_batch["batch_idx"], 0)
+            return new_batch, None, None, None
+            pass
         im, label, path, shapes = zip(*batch)  # transposed
+        # im = batch["img"]
+        # label = batch[""]
         for i, lb in enumerate(label):
             lb[:, 0] = i  # add target image index for build_targets()
         return torch.stack(im, 0), torch.cat(label, 0), path, shapes
@@ -1377,3 +1427,37 @@ def create_classification_dataloader(
         worker_init_fn=seed_worker,
         generator=generator,
     )  # or DataLoader(persistent_workers=True)
+
+
+def build_dataloader(dataset, batch, workers, shuffle=True, rank=-1):
+    """
+    Create and return an InfiniteDataLoader or DataLoader for training or validation.
+
+    Args:
+        dataset (Dataset): Dataset to load data from.
+        batch (int): Batch size for the dataloader.
+        workers (int): Number of worker threads for loading data.
+        shuffle (bool): Whether to shuffle the dataset.
+        rank (int): Process rank in distributed training. -1 for single-GPU training.
+
+    Returns:
+        (InfiniteDataLoader): A dataloader that can be used for training or validation.
+    """
+    batch = min(batch, len(dataset))
+    nd = torch.cuda.device_count()  # number of CUDA devices
+    nw = min(os.cpu_count() // max(nd, 1), workers)  # number of workers
+    sampler = None if rank == -1 else distributed.DistributedSampler(dataset, shuffle=shuffle)
+    generator = torch.Generator()
+    generator.manual_seed(6148914691236517205 + RANK)
+    return InfiniteDataLoader(
+        dataset=dataset,
+        batch_size=batch,
+        shuffle=shuffle and sampler is None,
+        num_workers=nw,
+        sampler=sampler,
+        # pin_memory=PIN_MEMORY,
+        pin_memory=False,
+        collate_fn=getattr(dataset, "collate_fn", None),
+        worker_init_fn=seed_worker,
+        generator=generator,
+    )
