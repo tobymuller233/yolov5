@@ -69,6 +69,7 @@ from utils.torch_utils import (
     dist2bbox,
     make_anchors,
 )
+from utils.fgmask import find_jaccard_overlap, make_center_anchors, center_to_corner
 
 try:
     import thop  # for FLOPs computation
@@ -105,7 +106,7 @@ class Detect(nn.Module):
             bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
             x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
 
-            if not (self.training or self.maskd):  # inference
+            if not (self.training or (hasattr(self, 'maskd') and self.maskd)):  # inference
                 if self.dynamic or self.grid[i].shape[2:4] != x[i].shape[2:4]:
                     self.grid[i], self.anchor_grid[i] = self._make_grid(nx, ny, i)
 
@@ -121,7 +122,7 @@ class Detect(nn.Module):
                     y = torch.cat((xy, wh, conf), 4)
                 z.append(y.view(bs, self.na * nx * ny, self.no))
 
-        return x if (self.training or self.maskd) else (torch.cat(z, 1),) if self.export else (torch.cat(z, 1), x)
+        return x if (self.training or (hasattr(self, 'maskd') and self.maskd)) else (torch.cat(z, 1),) if self.export else (torch.cat(z, 1), x)
 
     def _make_grid(self, nx=20, ny=20, i=0, torch_1_10=check_version(torch.__version__, "1.10.0")):
         """Generates a mesh grid for anchor boxes with optional compatibility for torch versions < 1.10."""
@@ -329,7 +330,7 @@ class BaseModel(nn.Module):
             x = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
             if visualize:
-                feature_visualization(x, m.type, m.i, n=4, save_dir=visualize)
+                feature_visualization(x, m.type, m.i, n=4, save_dir=visualize, full=True)
         return x
 
     def _profile_one_layer(self, m, x, dt):
@@ -435,8 +436,72 @@ class DetectionModel(BaseModel):
         initialize_weights(self)
         self.info()
         LOGGER.info("")
+    
+    def _get_imitation_mask(self, x, targets, iou_factor=0.5):
+        """
+        gt_box: (B, K, 4) [x_min, y_min, x_max, y_max]
+        """
+        out_size = x.size(2)
+        batch_size = x.size(0)
+        device = targets.device
 
-    def forward(self, x, augment=False, profile=False, visualize=False):
+        mask_batch = torch.zeros([batch_size, out_size, out_size])
+        
+        if not len(targets):
+            return mask_batch
+        
+        gt_boxes = [[] for i in range(batch_size)]
+        for i in range(len(targets)):
+            gt_boxes[int(targets[i, 0].data)] += [targets[i, 2:].clone().detach().unsqueeze(0)]
+        
+        max_num = 0
+        for i in range(batch_size):
+            max_num = max(max_num, len(gt_boxes[i]))
+            if len(gt_boxes[i]) == 0:
+                gt_boxes[i] = torch.zeros((1, 4), device=device)
+            else:
+                gt_boxes[i] = torch.cat(gt_boxes[i], 0)
+        
+        for i in range(batch_size):
+            # print(gt_boxes[i].device)
+            if max_num - gt_boxes[i].size(0):
+                gt_boxes[i] = torch.cat((gt_boxes[i], torch.zeros((max_num - gt_boxes[i].size(0), 4), device=device)), 0)
+            gt_boxes[i] = gt_boxes[i].unsqueeze(0)
+                
+        
+        gt_boxes = torch.cat(gt_boxes, 0)
+        gt_boxes *= out_size
+        
+        center_anchors = make_center_anchors(anchors_wh=self.anchors, grid_size=out_size, device=device)
+        anchors = center_to_corner(center_anchors).view(-1, 4)  # (N, 4)
+        
+        gt_boxes = center_to_corner(gt_boxes)
+
+        mask_batch = torch.zeros([batch_size, out_size, out_size], device=device)
+
+        for i in range(batch_size):
+            num_obj = gt_boxes[i].size(0)
+            if not num_obj:
+                continue
+             
+            IOU_map = find_jaccard_overlap(anchors, gt_boxes[i], 0).view(out_size, out_size, self.num_anchors, num_obj)
+            max_iou, _ = IOU_map.view(-1, num_obj).max(dim=0)
+            mask_img = torch.zeros([out_size, out_size], dtype=torch.int64, requires_grad=False).type_as(x)
+            threshold = max_iou * iou_factor
+
+            for k in range(num_obj):
+
+                mask_per_gt = torch.sum(IOU_map[:, :, :, k] > threshold[k], dim=2)
+
+                mask_img += mask_per_gt
+
+                mask_img += mask_img
+            mask_batch[i] = mask_img
+
+        mask_batch = mask_batch.clamp(0, 1)
+        return mask_batch  # (B, h, w)
+
+    def forward(self, x, augment=False, profile=False, visualize=False, target=None):
         """Performs single-scale or augmented inference and may include profiling or visualization."""
         if augment:
             return self._forward_augment(x)  # augmented inference, None

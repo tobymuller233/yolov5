@@ -216,7 +216,7 @@ def run(
             else:
                 pred = model(im, augment=augment, visualize=visualize)
         if opt.maskd_hyp:
-            mask_hook.get_loss()
+            mask_hook.reset_loss()
         # NMS
         with dt[2]:
             pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
@@ -414,7 +414,7 @@ def parse_opt():
     parser.add_argument("--vid-stride", type=int, default=1, help="video frame-rate stride")
 
     parser.add_argument("--maskd-hyp", type=str, default=None, help="Use hook to visualize masked feature maps")
-    parser.add_argument("--mask-weight", type=str, default=ROOT / "runs/debug/exp134/weights/maskmodule.pt", help="Path to the mask module weights")
+    parser.add_argument("--mask-weight", type=str, default=None, help="Path to the mask module weights")
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
     print_args(vars(opt))

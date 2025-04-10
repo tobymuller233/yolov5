@@ -164,7 +164,7 @@ class TransformerBlock(nn.Module):
 class Bottleneck(nn.Module):
     """Standard bottleneck."""
 
-    def __init__(self, c1, c2, shortcut=True, g=1, k=(3, 3), e=0.5):
+    def __init__(self, c1, c2, shortcut=True, g=1, k=(1, 1), e=0.5):
         """
         Initialize a standard bottleneck module.
 

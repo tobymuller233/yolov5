@@ -404,3 +404,13 @@ class BboxLoss(nn.Module):
             loss_dfl = torch.tensor(0.0).to(pred_dist.device)
 
         return loss_iou, loss_dfl
+
+# fgmask KD loss
+def imitation_loss(teacher, student, mask):
+    if student is None or teacher is None:
+        return 0
+    # print(teacher.shape, student.shape, mask.shape)
+    diff = torch.pow(student - teacher, 2) * mask
+    diff = diff.sum() / mask.sum() / 2
+
+    return diff

@@ -76,7 +76,7 @@ class Colors:
 colors = Colors()  # create instance for 'from utils.plots import colors'
 
 
-def feature_visualization(x, module_type, stage, n=32, save_dir=Path("runs/detect/exp")):
+def feature_visualization(x, module_type, stage, n=32, save_dir=Path("runs/detect/exp"), full=False):
     """
     x:              Features to be visualized
     module_type:    Module type
@@ -90,6 +90,22 @@ def feature_visualization(x, module_type, stage, n=32, save_dir=Path("runs/detec
         batch, channels, height, width = x.shape  # batch, channels, height, width
         if height > 1 and width > 1:
             f = save_dir / f"stage{stage}_{module_type.split('.')[-1]}_features.png"  # filename
+
+            if full:
+                # full image
+                combined_feature_map = torch.mean(x[0], dim=0)  # 对第一个batch的所有通道取平均
+                combined_feature_map = combined_feature_map.cpu().detach().numpy()  # 转换为numpy数组
+
+                # 绘制综合特征图
+                plt.figure(figsize=(8, 8))
+                plt.imshow(combined_feature_map, cmap='jet')  # 使用jet色图
+                plt.axis("off")
+                plt.title(f"Combined Feature Map - Stage {stage}")
+                LOGGER.info(f"Saving {f}...")
+                plt.savefig(f, dpi=300, bbox_inches="tight")
+                plt.close()
+                np.save(str(f.with_suffix(".npy")), x[0].cpu().numpy())  # npy save
+                return
 
             blocks = torch.chunk(x[0].cpu(), channels, dim=0)  # select batch index 0, block by channels
             n = min(n, channels)  # number of plots
