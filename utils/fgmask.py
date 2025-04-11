@@ -154,12 +154,9 @@ class Fgmask_Hook:
             threshold = max_iou * iou_factor
 
             for k in range(num_obj):
-
                 mask_per_gt = torch.sum(IOU_map[:, :, :, k] > threshold[k], dim=2)
-
                 mask_img += mask_per_gt
-
-                mask_img += mask_img
+                
             mask_batch[i] = mask_img
 
         mask_batch = mask_batch.clamp(0, 1)

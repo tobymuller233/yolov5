@@ -25,7 +25,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--weights", type=str, help="Path to the model weights")
     parser.add_argument("--img-size", type=int, default=640, help="Image size")
-    parser.add_argument("--ratio", type=int, default=0.5, help="Pruning ratio")
+    parser.add_argument("--ratio", type=float, default=0.5, help="Pruning ratio")
     parser.add_argument("--device", default="0", help="Device to run the model on")
     args = parser.parse_args()
     return args
@@ -52,28 +52,34 @@ if __name__ == "__main__":
             ignored_layers.append(m)
     print(ignored_layers)
 
-    iterative_steps = 1 # progressive pruning
-    pruner = tp.pruner.MagnitudePruner(
-        model,
-        example_inputs,
-        importance=imp,
-        iterative_steps=iterative_steps,
-        pruning_ratio=0.5, # remove 50% channels, ResNet18 = {64, 128, 256, 512} => ResNet18_Half = {32, 64, 128, 256}
-        ignored_layers=ignored_layers,
-    )
-
+    iterative_steps = 16 # progressive pruning
     
     base_macs, base_nparams = tp.utils.count_ops_and_params(model, example_inputs)
-    for g in pruner.step(interactive=True):
-        print(g)
-        g.prune()
-
-    pruned_macs, pruned_nparams = tp.utils.count_ops_and_params(model, example_inputs)
-    print(model)
     print("Before Pruning: MACs=%f G, #Params=%f G"%(base_macs/1e9, base_nparams/1e9))
-    print("After Pruning: MACs=%f G, #Params=%f G"%(pruned_macs/1e9, pruned_nparams/1e9))
+    for i in range(iterative_steps):
+        pruner = tp.pruner.MagnitudePruner(
+            model,
+            example_inputs,
+            importance=imp,
+            iterative_steps=iterative_steps,
+            pruning_ratio=ratio, # remove 50% channels, ResNet18 = {64, 128, 256, 512} => ResNet18_Half = {32, 64, 128, 256}
+            ignored_layers=ignored_layers,
+        )
+
+        
+        for g in pruner.step(interactive=True):
+            print(g)
+            g.prune()
+
+        pruned_macs, pruned_nparams = tp.utils.count_ops_and_params(model, example_inputs)
+        current_speed_up = float(base_macs) / float(pruned_macs)
+        # print(model)
+        # print("After Pruning: MACs=%f G, #Params=%f G"%(pruned_macs/1e9, pruned_nparams/1e9))
+        print(f"After pruning for {i + 1} steps: MACs={pruned_macs / 1e9:.2f} G, #Params={pruned_nparams / 1e6:.2f} M",
+              f" Speedup={current_speed_up:.2f}x")
 
     # save pruned model
-    prune_ratio = 0.5
+    prune_ratio = ratio
+    print(model)
     old_model['model'] = model
-    torch.save(old_model, f"weights/yolov5s_pruned_{prune_ratio}.pt")
+    torch.save(old_model, f"weights/yolov5n_pruned_{prune_ratio}.pt")

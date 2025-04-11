@@ -78,7 +78,7 @@ def _json_default(value):
 class Loggers:
     """Initializes and manages various logging utilities for tracking YOLOv5 training and validation metrics."""
 
-    def __init__(self, save_dir=None, weights=None, opt=None, hyp=None, logger=None, include=LOGGERS, mask=False, maskd=False):
+    def __init__(self, save_dir=None, weights=None, opt=None, hyp=None, logger=None, include=LOGGERS, mask=False, maskd=False, fgmask=False):
         """Initializes loggers for YOLOv5 training and validation metrics, paths, and options."""
         self.save_dir = save_dir
         self.weights = weights
@@ -106,6 +106,8 @@ class Loggers:
         #     self.keys.insert(3, "train/mask_loss")
         if maskd:
             self.keys.insert(3, "train/maskd_loss")
+        elif fgmask:
+            self.keys.insert(3, "train/fgmask_loss")
         self.best_keys = ["best/epoch", "best/precision", "best/recall", "best/mAP_0.5", "best/mAP_0.5:0.95"]
         for k in LOGGERS:
             setattr(self, k, None)  # init empty logger dictionary
