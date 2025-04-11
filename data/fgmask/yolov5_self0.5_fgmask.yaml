@@ -1,0 +1,5 @@
+fgmask_channels: [128, 64, 128, 256]
+fgmask_modules: ["model.13.cv3.conv", "model.17.cv3.conv", "model.20.cv3.conv", "model.23.cv3.conv"]
+
+fgmask_stu_channels: [72, 32, 72, 149]
+fgmask_tea_channels: [128, 64, 128, 256]
