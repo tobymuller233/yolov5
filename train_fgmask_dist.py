@@ -186,6 +186,7 @@ def train(hyp, opt, device, callbacks):
             hyp=hyp,
             logger=LOGGER,
             include=tuple(include_loggers),
+            fgmask=opt.teacher_weights is not None
         )
 
         # Register actions
@@ -431,10 +432,15 @@ def train(hyp, opt, device, callbacks):
         # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
 
         mloss = torch.zeros(3, device=device)  # mean losses
+        if opt.teacher_weights:
+            mfgmaskloss = torch.zeros(1, device=device)  # mean fgmask losses 
         if RANK != -1:
             train_loader.sampler.set_epoch(epoch)
         pbar = enumerate(train_loader)
-        LOGGER.info(("\n" + "%11s" * 7) % ("Epoch", "GPU_mem", "box_loss", "obj_loss", "cls_loss", "Instances", "Size"))
+        if opt.teacher_weights:
+            LOGGER.info(("\n" + "%13s" * 8) % ("Epoch", "GPU_mem", "box_loss", "obj_loss", "cls_loss", "fgmask_loss", "Instances", "Size"))
+        else:
+            LOGGER.info(("\n" + "%11s" * 7) % ("Epoch", "GPU_mem", "box_loss", "obj_loss", "cls_loss", "Instances", "Size"))
         if RANK in {-1, 0}:
             pbar = tqdm(pbar, total=nb, bar_format=TQDM_BAR_FORMAT)  # progress bar
         optimizer.zero_grad()
@@ -484,7 +490,8 @@ def train(hyp, opt, device, callbacks):
                                 s_feature = student_adaptive_layer[i](s_feature)
                                 t_mask = t_mask.detach()
                                 fgmask_loss += imitation_loss(t_feature, s_feature, t_mask) * 0.01
-                            loss += fgmask_loss * batch_size
+                            # loss += fgmask_loss * batch_size
+                            loss += fgmask_loss
                             pass
                         else:
                             pred = model(imgs)  # forward
@@ -526,12 +533,20 @@ def train(hyp, opt, device, callbacks):
             # Log
             if RANK in {-1, 0}:
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
+                mfgmaskloss = (mfgmaskloss * i + fgmask_loss) / (i + 1) if opt.teacher_weights else 0
                 mem = f"{torch.cuda.memory_reserved() / 1e9 if torch.cuda.is_available() else 0:.3g}G"  # (GB)
-                pbar.set_description(
-                    ("%11s" * 2 + "%11.4g" * 5)
-                    % (f"{epoch}/{epochs - 1}", mem, *mloss, targets.shape[0], imgs.shape[-1])
-                )
-                callbacks.run("on_train_batch_end", model, ni, imgs, targets, paths, list(mloss))
+                if opt.teacher_weights:
+                    pbar.set_description(
+                        ("%13s" * 2 + "%13.4g" * 6)
+                        % (f"{epoch}/{epochs - 1}", mem, *mloss, mfgmaskloss, targets.shape[0], imgs.shape[-1])
+                    )
+                else:
+                    pbar.set_description(
+                        ("%11s" * 2 + "%11.4g" * 5)
+                        % (f"{epoch}/{epochs - 1}", mem, *mloss, targets.shape[0], imgs.shape[-1])
+                    )
+                    
+                callbacks.run("on_train_batch_end", model, ni, imgs, targets, paths, list(mloss) + list(mfgmaskloss))
                 if callbacks.stop_training:
                     return
             # end batch ------------------------------------------------------------------------------------------------
@@ -539,7 +554,8 @@ def train(hyp, opt, device, callbacks):
         # Scheduler
         lr = [x["lr"] for x in optimizer.param_groups]  # for loggers
         scheduler.step()
-
+        
+        fgmask_hook.remove_handle_()
         if RANK in {-1, 0}:
             # mAP
             callbacks.run("on_train_epoch_end", epoch=epoch)
@@ -565,7 +581,7 @@ def train(hyp, opt, device, callbacks):
             stop = stopper(epoch=epoch, fitness=fi)  # early stop check
             if fi > best_fitness:
                 best_fitness = fi
-            log_vals = list(mloss) + list(results) + lr
+            log_vals = list(mloss) + list(mfgmaskloss) + list(results) + lr
             callbacks.run("on_fit_epoch_end", log_vals, epoch, best_fitness, fi)
 
             # Save model
@@ -625,7 +641,7 @@ def train(hyp, opt, device, callbacks):
                         compute_loss=compute_loss,
                     )  # val best model with plots
                     if is_coco:
-                        callbacks.run("on_fit_epoch_end", list(mloss) + list(results) + lr, epoch, best_fitness, fi)
+                        callbacks.run("on_fit_epoch_end", list(mloss) + list(mfgmaskloss) + list(results) + lr, epoch, best_fitness, fi)
 
         callbacks.run("on_train_end", last, best, epoch, results)
 
