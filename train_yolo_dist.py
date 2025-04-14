@@ -457,6 +457,8 @@ def train(hyp, opt, device, callbacks):
                             pred = model(imgs)
                             with torch.no_grad():
                                 t_pred = t_model(imgs)
+                                if opt.fmnms:
+                                    t_pred = ComputeLoss.apply_fmnms(t_pred, 3)
                             loss, loss_items = compute_loss(pred, targets.to(device))
                             loss, dist_loss = compute_loss.dist_loss(pred, t_pred, loss)
                             pass
@@ -645,6 +647,7 @@ def parse_opt(known=False):
     parser.add_argument("--weights", type=str, default=ROOT / "yolov5s.pt", help="initial weights path")
     parser.add_argument("--cfg", type=str, default="", help="model.yaml path")
     parser.add_argument("--teacher-weights", type=str, default=ROOT / "weights/yolov5l.pt", help="teacher weights path")
+    parser.add_argument("--fmnms", action="store_true", help="use feature map NMS")
 
     parser.add_argument("--data", type=str, default=ROOT / "data/coco128.yaml", help="dataset.yaml path")
     parser.add_argument("--hyp", type=str, default=ROOT / "data/hyps/hyp.scratch-low.yaml", help="hyperparameters path")

@@ -224,6 +224,67 @@ class ComputeLoss:
         dist_loss = (lbox + lobj + lcls) * bs
         loss += (lbox + lobj + lcls) * bs
         return loss, dist_loss
+    
+    def apply_fmnms(teacher_pred, kernel_size=3):
+        """
+        Apply Feature Map NMS (FMNMS) to suppress overlapping detections in teacher model predictions.
+        
+        Args:
+            teacher_pred (Tensor): Teacher model predictions with shape (B, A, H, W, 5 + C),
+                where B is batch size, A is number of anchors, H/W is grid size, and C is number of classes.
+                The last dimension has format [x, y, w, h, objectness, class1, ..., classC].
+            kernel_size (int): Size of the neighborhood window (default 3x3).
+        
+        Returns:
+            Tensor: Processed teacher predictions with overlapping detections suppressed.
+        """
+        B, A, H, W, _ = teacher_pred.shape
+        C = teacher_pred.shape[-1] - 5  # Number of classes
+        
+        # Extract objectness (confidence) and class probabilities
+        objectness = teacher_pred[..., 4]          # (B, A, H, W)
+        class_probs = teacher_pred[..., 5:]       # (B, A, H, W, C)
+        
+        # Compute total probability (objectness * class probability)
+        total_prob = objectness.unsqueeze(-1) * class_probs  # (B, A, H, W, C)
+        
+        # Process each anchor separately
+        for a in range(A):
+            # Extract current anchor's total probabilities
+            current_total = total_prob[:, a, :, :, :]  # (B, H, W, C)
+            current_total = current_total.permute(0, 3, 1, 2)  # (B, C, H, W)
+            
+            # Apply max-pooling over the kernel_size window
+            padding = kernel_size // 2
+            max_pooled = F.max_pool2d(
+                current_total, 
+                kernel_size=kernel_size, 
+                stride=1, 
+                padding=padding
+            )
+            
+            # Create mask: 1 where current value equals the max in the window
+            mask = (current_total == max_pooled).float()
+            
+            # Apply mask to retain only the maximum values
+            masked = current_total * mask
+            
+            # Restore original dimensions and update total_prob
+            masked = masked.permute(0, 2, 3, 1)  # (B, H, W, C)
+            total_prob[:, a, :, :, :] = masked
+        
+        # Compute new class probabilities (avoid division by zero)
+        objectness_unsqueeze = objectness.unsqueeze(-1)
+        class_probs_new = torch.where(
+            objectness_unsqueeze > 1e-9,
+            total_prob / objectness_unsqueeze,
+            torch.zeros_like(total_prob)
+        )
+        
+        # Update teacher predictions with processed class probabilities
+        teacher_pred[..., 5:] = class_probs_new
+        
+        return teacher_pred
 
     def build_targets(self, p, targets):
         """Prepares model targets from input targets (image,class,x,y,w,h) for loss computation, returning class, box,
