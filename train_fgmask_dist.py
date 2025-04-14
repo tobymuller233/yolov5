@@ -400,7 +400,10 @@ def train(hyp, opt, device, callbacks):
     
     # fgmask hook
     if opt.teacher_weights:
-        fgmask_hook = Fgmask_Hook(t_model, model, fgmask_hyp, t_model.model[-1].anchors, device=device)
+        if hasattr(t_model, "module"):
+            fgmask_hook = Fgmask_Hook(t_model, model, fgmask_hyp, t_model.module.model[-1].anchors, device=device)
+        else: 
+            fgmask_hook = Fgmask_Hook(t_model, model, fgmask_hyp, t_model.model[-1].anchors, device=device)
         fgmask_hook.register_hook()
         stu_channels = fgmask_hyp["fgmask_stu_channels"]
         tea_channels = fgmask_hyp["fgmask_tea_channels"]

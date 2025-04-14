@@ -71,6 +71,8 @@ class Fgmask_Hook:
         self.num_anchors = anchors.shape[0] * anchors.shape[1]
 
         self.module_pairs = hyp["fgmask_modules"]
+        if hasattr(t_model, "module"):
+            self.module_pairs = ["module." + name for name in self.module_pairs]
         self.teacher_modules = []
         self.student_modules= []
         self.remove_handle = []
