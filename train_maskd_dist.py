@@ -63,7 +63,7 @@ from utils.general import (
     strip_optimizer,
     yaml_save,
 )
-from utils.loggers import LOGGERS, Loggers
+from utils.loggers import LOGGERS, Loggers, DistType
 from utils.loggers.comet.comet_utils import check_comet_resume
 from utils.loss import ComputeLoss, v8DetectionLoss
 from utils.metrics import fitness
@@ -156,8 +156,7 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
             hyp=hyp,
             logger=LOGGER,
             include=tuple(include_loggers),
-            mask=True,
-            maskd=True,
+            disttype=DistType.maskd
         )
 
         # Register actions

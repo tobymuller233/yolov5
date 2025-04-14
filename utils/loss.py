@@ -189,6 +189,41 @@ class ComputeLoss:
         bs = tobj.shape[0]  # batch size
 
         return (lbox + lobj + lcls) * bs, torch.cat((lbox, lobj, lcls)).detach()
+    
+    def dist_loss(self, p, t_p, loss):  # predictions, targets
+        """Performs forward pass, calculating class, box, and object loss for given predictions and targets."""
+        lcls = torch.zeros(1, device=self.device)  # class loss
+        lbox = torch.zeros(1, device=self.device)  # box loss
+        lobj = torch.zeros(1, device=self.device)  # object loss
+
+        DistLoss = nn.MSELoss(reduction="none")
+        # Losses
+        for i, pi in enumerate(p):  # layer index, layer predictions
+            # teacher model prediction
+            t_pi = t_p[i]
+            t_obj_scale = t_pi[..., 4].sigmoid()
+
+            # bbox loss
+            b_obj_scale = t_obj_scale.unsqueeze(-1).repeat(1, 1, 1, 1, 4)
+            lbox += torch.mean(DistLoss(pi[..., :4], t_pi[..., :4]) * b_obj_scale)
+
+            # class loss
+            if self.nc > 1:  # cls loss (only if multiple classes)
+                c_obj_scale = t_obj_scale.unsqueeze(-1).repeat(1, 1, 1, 1, self.nc)
+                lcls += torch.mean(DistLoss(pi[..., 5:], t_pi[..., 5:]) * c_obj_scale)
+            
+            lobj += torch.mean(DistLoss(pi[..., 4], t_pi[..., 4]) * t_obj_scale)
+            
+
+        
+        lbox *= self.hyp["box"] * 1.0
+        lobj *= self.hyp["obj"] * 1.0
+        lcls *= self.hyp["cls"] * 1.0
+        bs = p[0].shape[0]  # batch size
+        
+        dist_loss = (lbox + lobj + lcls) * bs
+        loss += (lbox + lobj + lcls) * bs
+        return loss, dist_loss
 
     def build_targets(self, p, targets):
         """Prepares model targets from input targets (image,class,x,y,w,h) for loss computation, returning class, box,
