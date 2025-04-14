@@ -398,7 +398,7 @@ def train(hyp, opt, device, callbacks):
         model.train()
 
         if opt.teacher_weights:
-            t_model.eval()
+            t_model.train()
         # Update image weights (optional, single-GPU only)
         if opt.image_weights:
             cw = model.class_weights.cpu().numpy() * (1 - maps) ** 2 / nc  # class weights
@@ -455,7 +455,8 @@ def train(hyp, opt, device, callbacks):
                     if targets is not None: # not v8loader
                         if opt.teacher_weights:
                             pred = model(imgs)
-                            t_pred = t_model(imgs)
+                            with torch.no_grad():
+                                t_pred = t_model(imgs)
                             loss, loss_items = compute_loss(pred, targets.to(device))
                             loss, dist_loss = compute_loss.dist_loss(pred, t_pred, loss)
                             pass
