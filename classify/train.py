@@ -29,6 +29,7 @@ import torch.optim.lr_scheduler as lr_scheduler
 import torchvision
 from torch.cuda import amp
 from tqdm import tqdm
+import yaml
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[1]  # YOLOv5 root directory
@@ -68,6 +69,7 @@ from utils.torch_utils import (
     smartCrossEntropyLoss,
     torch_distributed_zero_first,
 )
+from utils.loss import FeatureLoss, Distillation_Hook
 
 LOCAL_RANK = int(os.getenv("LOCAL_RANK", -1))  # https://pytorch.org/docs/stable/elastic/run.html
 RANK = int(os.getenv("RANK", -1))
@@ -88,6 +90,11 @@ def train(opt, device):
         str(opt.pretrained).lower() == "true",
     )
     cuda = device.type != "cpu"
+
+    if opt.dist_hyp:
+        dist_hyp = opt.dist_hyp
+        with open(dist_hyp, "r") as f:
+            dist_hyp = yaml.safe_load(f)
 
     # Directories
     wdir = save_dir / "weights"
@@ -142,6 +149,8 @@ def train(opt, device):
     with torch_distributed_zero_first(LOCAL_RANK), WorkingDirectory(ROOT):
         if Path(opt.model).is_file() or opt.model.endswith(".pt"):
             model = attempt_load(opt.model, device="cpu", fuse=False)
+            if opt.teacher_weights:
+                t_model = attempt_load(opt.teacher_weights, device="cpu", fuse=False)
         elif opt.model in torchvision.models.__dict__:  # TorchVision models i.e. resnet50, efficientnet_b0
             model = torchvision.models.__dict__[opt.model](weights="IMAGENET1K_V1" if pretrained else None)
         else:
@@ -160,6 +169,10 @@ def train(opt, device):
         p.requires_grad = True  # for training
     model = model.to(device)
 
+    if opt.teacher_weights:
+        for n, p in t_model.named_parameters():
+            p.requires_grad = False
+        t_model = t_model.to(device)
     # Info
     if RANK in {-1, 0}:
         model.names = trainloader.dataset.classes  # attach class names
@@ -205,10 +218,14 @@ def train(opt, device):
         f"Using {nw * WORLD_SIZE} dataloader workers\n"
         f"Logging results to {colorstr('bold', save_dir)}\n"
         f"Starting {opt.model} training on {data} dataset with {nc} classes for {epochs} epochs...\n\n"
-        f"{'Epoch':>10}{'GPU_mem':>10}{'train_loss':>12}{f'{val}_loss':>12}{'top1_acc':>12}{'top5_acc':>12}"
+        f"{'Epoch':>10}{'GPU_mem':>10}{'train_loss':>12}{'dist_loss':>12}{f'{val}_loss':>12}{'top1_acc':>12}{'top5_acc':>12}"
     )
+
+    if opt.teacher_weights:
+        dist_hook = Distillation_Hook(model, t_model, dist_hyp, dist=opt.dist, device=device)  
+        dist_hook.register_hook()
     for epoch in range(epochs):  # loop over the dataset multiple times
-        tloss, vloss, fitness = 0.0, 0.0, 0.0  # train loss, val loss, fitness
+        tloss, vloss, fitness. tdistloss = 0.0, 0.0, 0.0, 0.0  # train loss, val loss, fitness, dist loss (if has)
         model.train()
         if RANK != -1:
             trainloader.sampler.set_epoch(epoch)
@@ -220,7 +237,11 @@ def train(opt, device):
 
             # Forward
             with amp.autocast(enabled=cuda):  # stability issues when enabled
-                loss = criterion(model(images), labels)
+                pred = model(images)
+                dist_loss = dist_hook.get_loss() if opt.teacher_weights else 0
+                loss = criterion(pred, labels)
+                loss += dist_loss
+                # loss = criterion(model(images), labels)
 
             # Backward
             scaler.scale(loss).backward()
@@ -237,8 +258,9 @@ def train(opt, device):
             if RANK in {-1, 0}:
                 # Print
                 tloss = (tloss * i + loss.item()) / (i + 1)  # update mean losses
+                tdistloss = (tdistloss * i + dist_loss.item()) / (i + 1)  # update mean distillation loss
                 mem = "%.3gG" % (torch.cuda.memory_reserved() / 1e9 if torch.cuda.is_available() else 0)  # (GB)
-                pbar.desc = f"{f'{epoch + 1}/{epochs}':>10}{mem:>10}{tloss:>12.3g}" + " " * 36
+                pbar.desc = f"{f'{epoch + 1}/{epochs}':>10}{mem:>10}{tloss:>12.3g}{tdistloss:>12.3g}" + " " * 36
 
                 # Test
                 if i == len(pbar) - 1:  # last batch
@@ -259,6 +281,7 @@ def train(opt, device):
             # Log
             metrics = {
                 "train/loss": tloss,
+                "train/distloss": tdistloss,
                 f"{val}/loss": vloss,
                 "metrics/accuracy_top1": top1,
                 "metrics/accuracy_top5": top5,
@@ -316,6 +339,9 @@ def parse_opt(known=False):
     """
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="yolov5s-cls.pt", help="initial weights path")
+    parser.add_argument("--teacher-weights", type=str, default=None, help="teacher model weights path")
+    parser.add_argument("--dist", type=str, nargs="?", const="cwd", help="cwd, mgd, maskd")
+    parser.add_argument("--dist-hyp", type=str, default=None, help="distillation hyperparameters")
     parser.add_argument("--data", type=str, default="imagenette160", help="cifar10, cifar100, mnist, imagenet, ...")
     parser.add_argument("--epochs", type=int, default=10, help="total training epochs")
     parser.add_argument("--batch-size", type=int, default=64, help="total batch size for all GPUs")

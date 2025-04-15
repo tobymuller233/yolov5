@@ -36,6 +36,7 @@ data/images/*
 !data/*.sh
 !data/maskd
 !data/fgmask
+!data/dist
 
 results*.csv
 

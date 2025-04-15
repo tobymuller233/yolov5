@@ -1,0 +1,5 @@
+fgmask_channels: [512]
+fgmask_modules: ["model.8.cv3.conv"]
+
+fgmask_stu_channels: [256]
+fgmask_tea_channels: [512]
