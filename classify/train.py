@@ -225,7 +225,7 @@ def train(opt, device):
         dist_hook = Distillation_Hook(model, t_model, dist_hyp, dist=opt.dist, device=device)  
         dist_hook.register_hook()
     for epoch in range(epochs):  # loop over the dataset multiple times
-        tloss, vloss, fitness. tdistloss = 0.0, 0.0, 0.0, 0.0  # train loss, val loss, fitness, dist loss (if has)
+        tloss, vloss, fitness, tdistloss = 0.0, 0.0, 0.0, 0.0  # train loss, val loss, fitness, dist loss (if has)
         model.train()
         if RANK != -1:
             trainloader.sampler.set_epoch(epoch)
