@@ -312,6 +312,8 @@ def train(opt, device):
                     torch.save(ckpt, best)
                 del ckpt
 
+    if opt.teacher_weights:
+        dist_hook.remove_handle()
     # Train complete
     if RANK in {-1, 0} and final_epoch:
         LOGGER.info(
