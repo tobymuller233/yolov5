@@ -1,0 +1,5 @@
+dist_modules: ["model.8.cv3.conv"]
+
+dist_stu_channels: [256]
+dist_tea_channels: [512]
+dist_loss_weight: 1.0

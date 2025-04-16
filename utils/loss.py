@@ -510,3 +510,189 @@ def imitation_loss(teacher, student, mask):
     diff = diff.sum() / mask.sum() / 2
 
     return diff
+
+class FeatureLoss(nn.Module):
+    def __init__(self, channels_s, channels_t, distiller='mgd', loss_weight=1.0, device="cpu"):
+        super(FeatureLoss, self).__init__()
+        self.loss_weight = loss_weight
+        self.distiller = distiller
+
+        self.align_module = nn.ModuleList([
+            nn.Conv2d(channel, tea_channel, kernel_size=1, stride=1, padding=0).to(device)
+            for channel, tea_channel in zip(channels_s, channels_t)
+        ])
+        self.norm = [
+            nn.BatchNorm2d(tea_channel, affine=False).to(device)
+            for tea_channel in channels_t
+        ]
+        self.norm1 = [
+            nn.BatchNorm2d(set_channel, affine=False).to(device)
+            for set_channel in channels_s
+        ]
+
+        if distiller == 'mgd':
+            self.feature_loss = MGDLoss(channels_s, channels_t)
+        elif distiller == 'cwd':
+            self.feature_loss = CWDLoss(channels_s, channels_t)
+        else:
+            raise NotImplementedError
+
+    def forward(self, y_s, y_t):
+        assert len(y_s) == len(y_t)
+        tea_feats = []
+        stu_feats = []
+
+        for idx, (s, t) in enumerate(zip(y_s, y_t)):
+            # change ---
+            if self.distiller == 'cwd':
+                s = self.align_module[idx](s)
+                s = self.norm[idx](s)
+            else:
+                s = self.norm1[idx](s)
+            t = self.norm[idx](t)
+            tea_feats.append(t)
+            stu_feats.append(s)
+
+        loss = self.feature_loss(stu_feats, tea_feats)
+        return self.loss_weight * loss
+
+class CWDLoss(nn.Module):
+    def __init__(self, channels_s, channels_t, tau=1.0):
+        super(CWDLoss, self).__init__()
+        self.tau = tau
+
+    def forward(self, y_s, y_t):
+        """Forward computation.
+        Args:
+            y_s (list): The student model prediction with
+                shape (N, C, H, W) in list.
+            y_t (list): The teacher model prediction with
+                shape (N, C, H, W) in list.
+        Return:
+            torch.Tensor: The calculated loss value of all stages.
+        """
+        assert len(y_s) == len(y_t)
+        losses = []
+
+        for idx, (s, t) in enumerate(zip(y_s, y_t)):
+            assert s.shape == t.shape
+
+            N, C, H, W = s.shape
+
+            # normalize in channel diemension
+            import torch.nn.functional as F
+            softmax_pred_T = F.softmax(t.view(-1, W * H) / self.tau, dim=1)  # [N*C, H*W]
+
+            logsoftmax = torch.nn.LogSoftmax(dim=1)
+            cost = torch.sum(
+                softmax_pred_T * logsoftmax(t.view(-1, W * H) / self.tau) -
+                softmax_pred_T * logsoftmax(s.view(-1, W * H) / self.tau)) * (self.tau ** 2)
+
+            losses.append(cost / (C * N))
+        loss = sum(losses)
+
+        return loss
+
+class MGDLoss(nn.Module):
+    def __init__(self, channels_s, channels_t, alpha_mgd=0.00002, lambda_mgd=0.65):
+        super(MGDLoss, self).__init__()
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+        self.alpha_mgd = alpha_mgd
+        self.lambda_mgd = lambda_mgd
+
+        self.generation = [
+            nn.Sequential(
+                nn.Conv2d(channel_s, channel, kernel_size=3, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(channel, channel, kernel_size=3, padding=1)).to(device) for channel_s,channel in zip(channels_s,channels_t)
+        ]
+
+    def forward(self, y_s, y_t,layer=None):
+        """Forward computation.
+        Args:
+            y_s (list): The student model prediction with
+                shape (N, C, H, W) in list.
+            y_t (list): The teacher model prediction with
+                shape (N, C, H, W) in list.
+        Return:
+            torch.Tensor: The calculated loss value of all stages.
+        """
+        assert len(y_s) == len(y_t)
+        losses = []
+        for idx, (s, t) in enumerate(zip(y_s, y_t)):
+            # print(s.shape)
+            # print(t.shape)
+            # assert s.shape == t.shape
+            if layer == "outlayer":
+                idx = -1
+            losses.append(self.get_dis_loss(s, t, idx) * self.alpha_mgd)
+        loss = sum(losses)
+        return loss
+
+    def get_dis_loss(self, preds_S, preds_T, idx):
+        loss_mse = nn.MSELoss(reduction='sum')
+        N, C, H, W = preds_T.shape
+
+        device = preds_S.device
+        mat = torch.rand((N, 1, H, W)).to(device)
+        mat = torch.where(mat > 1 - self.lambda_mgd, 0, 1).to(device)
+
+        masked_fea = torch.mul(preds_S, mat)
+        new_fea = self.generation[idx](masked_fea)
+
+        dis_loss = loss_mse(new_fea, preds_T) / N
+
+        return dis_loss
+
+class Distillation_Hook:
+    """Hook for distillation loss calculation."""
+
+    def __init__(self, s_model, t_model, dist_hyp, dist="cwd", device="cpu"):
+        self.s_model = s_model
+        self.t_model = t_model
+        self.dist_hyp = dist_hyp
+        self.dist = dist
+
+        self.s_channels = dist_hyp["dist_stu_channels"]
+        self.t_channels = dist_hyp["dist_tea_channels"]
+
+        self.teacher_module_pairs = []
+        self.student_module_pairs = []
+        self.remove_handle = []
+        
+        for name, m in t_model.named_modules():
+            if name in dist_hyp["dist_modules"]:
+                self.teacher_module_pairs.append(m)
+        for name, m in s_model.named_modules():
+            if name in dist_hyp["dist_modules"]:
+                self.student_module_pairs.append(m)
+        
+        self.dist_loss_fn = FeatureLoss(self.s_channels, self.t_channels, distiller=dist, loss_weight=dist_hyp["dist_loss_weight"], device=device)
+        
+    def register_hook(self):
+        self.teacher_outputs = []
+        self.student_outputs = []
+
+        def make_layer_forward_hook(l):
+            def forward_hook(m, input, output):
+                l.append(output)
+
+            return forward_hook
+
+        for mt, ms in zip(self.teacher_module_pairs, self.student_module_pairs):
+            self.remove_handle.append(mt.register_forward_hook(make_layer_forward_hook(self.teacher_outputs)))
+            self.remove_handle.append(ms.register_forward_hook(make_layer_forward_hook(self.student_outputs)))
+    
+    def get_loss(self):
+        loss = self.dist_loss_fn(self.student_outputs, self.teacher_outputs)
+        self.student_outputs.clear()
+        self.teacher_outputs.clear()
+        return loss
+    
+    def remove_handle_(self):
+        for handle in self.remove_handle:
+            handle.remove()
+                
+        
+        

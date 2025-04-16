@@ -36,6 +36,7 @@ data/images/*
 !data/*.sh
 !data/maskd
 !data/fgmask
+# !data/dist
 
 results*.csv
 
@@ -82,6 +83,7 @@ env/
 build/
 develop-eggs/
 dist/
+!data/dist
 downloads/
 eggs/
 .eggs/
