@@ -1,4 +1,4 @@
-from models.yolo import Detect
+from models.yolo import Detect, DetectNoAnchor
 import torch
 import torch.nn as nn
 import torch_pruning as tp
@@ -27,6 +27,9 @@ def parse_args():
     parser.add_argument("--img-size", type=int, default=640, help="Image size")
     parser.add_argument("--ratio", type=float, default=0.5, help="Pruning ratio")
     parser.add_argument("--device", default="0", help="Device to run the model on")
+    parser.add_argument("--save-name", default="pruned_model", help="Name of the saved pruned model")
+    parser.add_argument("--project", default="runs/prune", help="Project name")
+    parser.add_argument("--name", default="exp", help="Experiment name")
     args = parser.parse_args()
     return args
 
@@ -35,6 +38,8 @@ if __name__ == "__main__":
     weights = args.weights
     img_size = args.img_size
     ratio = args.ratio
+    save_dir = str(increment_path(Path(args.project) / args.name, exist_ok=True, mkdir=True))
+    log_file = os.path.join(save_dir, 'prune.log')
 
     device = select_device(args.device)
     # model = DetectMultiBackend(weights, device=device, dnn=False, data=None, fp16=False)
@@ -43,12 +48,12 @@ if __name__ == "__main__":
     for p in model.parameters():
         p.requires_grad_(True)
 
-    example_inputs = torch.randn(1, 3, 224, 224).to(device)
+    example_inputs = torch.randn(1, 3, args.img_size, args.img_size).to(device)
     imp = tp.importance.MagnitudeImportance(p=2) # L2 norm pruning
 
     ignored_layers = []
     for m in model.model.modules():
-        if isinstance(m, Detect):
+        if isinstance(m, (Detect, DetectNoAnchor)):
             ignored_layers.append(m)
     print(ignored_layers)
 
@@ -77,9 +82,14 @@ if __name__ == "__main__":
         # print("After Pruning: MACs=%f G, #Params=%f G"%(pruned_macs/1e9, pruned_nparams/1e9))
         print(f"After pruning for {i + 1} steps: MACs={pruned_macs / 1e9:.2f} G, #Params={pruned_nparams / 1e6:.2f} M",
               f" Speedup={current_speed_up:.2f}x")
+        # logging
+        with open(log_file, 'a') as f:
+            f.write(f"After pruning for {i + 1} steps: MACs={pruned_macs / 1e9:.2f} G, #Params={pruned_nparams / 1e6:.2f} M Speedup={current_speed_up:.2f}x\n")
+        
 
     # save pruned model
     prune_ratio = ratio
     print(model)
     old_model['model'] = model
-    torch.save(old_model, f"weights/yolov5n_pruned_{prune_ratio}.pt")
+    # torch.save(old_model, f"weights/{weight_name}_pruned_{prune_ratio}.pt")
+    torch.save(old_model, os.path.join(save_dir, f"{args.save_name}_{prune_ratio}.pt"))
