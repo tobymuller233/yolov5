@@ -238,6 +238,8 @@ def train(opt, device):
             # Forward
             with amp.autocast(enabled=cuda):  # stability issues when enabled
                 pred = model(images)
+                with torch.no_grad():
+                    t_pred = t_model(images)
                 dist_loss = dist_hook.get_loss() if opt.teacher_weights else 0
                 loss = criterion(pred, labels)
                 loss += dist_loss
