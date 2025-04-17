@@ -1,0 +1,5 @@
+dist_modules: ["model.4.cv3.conv", "model.6.cv3.conv", "model.8.cv3.conv"]
+
+dist_stu_channels: [64, 128, 256]
+dist_tea_channels: [128, 256, 512]
+dist_loss_weight: 1.0
