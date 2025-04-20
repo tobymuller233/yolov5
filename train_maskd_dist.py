@@ -249,7 +249,7 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
     hyp["maskd_mask_optimizer"]["weight_decay"] *= batch_size * accumulate / nbs  # scale weight_decay
 
     mask_optimizer = smart_optimizer(mask_model, hyp["maskd_mask_optimizer"]["type"], hyp["maskd_mask_optimizer"]["lr"], hyp["momentum"], hyp["maskd_mask_optimizer"]["weight_decay"])
-    optimizer = smart_optimizer(model, opt.optimizer, hyp["lr0"], hyp["momentum"], hyp["weight_decay"])
+    optimizer = smart_optimizer(model, opt.optimizer, hyp["maskd_initlr"], hyp["maskd_dist_momentum"], hyp["maskd_dist_weight_decay"])
 
     # Scheduler
     if opt.cos_lr:
@@ -261,8 +261,8 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
             return (1 - x / epochs) * (1.0 - hyp["lrf"]) + hyp["lrf"]  # linear
 
     mask_scheduler = lr_scheduler.CosineAnnealingLR(mask_optimizer, eta_min=hyp["maskd_mask_lr"]["min_lr"], T_max=hyp["maskd_mask_trainiter"])
-    scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)  # plot_lr_scheduler(optimizer, scheduler, epochs)
-
+    # scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)  # plot_lr_scheduler(optimizer, scheduler, epochs)
+    scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[int(opt.epochs * 8 / 25), int(opt.epochs * 11 / 25)], gamma=0.1)  # plot_lr_scheduler(optimizer, scheduler, epochs)
     # EMA
     ema = ModelEMA(model) if RANK in {-1, 0} else None
     ema_mask = ModelEMA(mask_model) if RANK in {-1, 0} else None
@@ -356,7 +356,7 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
     # Start training
     t0 = time.time()
     nb = len(train_loader)  # number of batches
-    nw = max(round(hyp["warmup_epochs"] * nb), 100)  # number of warmup iterations, max(3 epochs, 100 iterations)
+    nw = max(round(hyp["warmup_epochs"] * nb), 500)  # number of warmup iterations, max(3 epochs, 100 iterations)
     # nw = min(nw, (epochs - start_epoch) / 2 * nb)  # limit warmup to < 1/2 of training
     last_opt_step = -1
     maps = np.zeros(nc)  # mAP per class
@@ -487,7 +487,7 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
                         ("%11s" * 2 + "%11.4g" * 6)
                         % (f"{epoch}/{epochs - 1}", mem, *mloss, maskd_loss, targets.shape[0], imgs.shape[-1])
                     )
-                    callbacks.run("on_train_batch_end", model, ni, imgs, targets, paths, list(mloss))
+                    callbacks.run("on_train_batch_end", mask_loss.mask_modules, ni, imgs, targets, paths, list(mloss))
                     if callbacks.stop_training:
                         return
                 mask_scheduler.step()
