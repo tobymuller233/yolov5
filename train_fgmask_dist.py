@@ -509,6 +509,20 @@ def train(hyp, opt, device, callbacks):
                                 train_batch["img"] = nn.functional.interpolate(train_batch["img"], size=ns, mode="bilinear", align_corners=False)
                         pred = model(train_batch["img"])
                         loss, loss_items = compute_loss(pred, train_batch)
+                        fgmask_loss = 0
+                        if opt.teacher_weights:
+                            t_pred = t_model(train_batch["img"])
+                            t_features = fgmask_hook.teacher_outputs
+                            s_features = fgmask_hook.student_outputs
+                            # t_masks = fgmask_hook.get_mask(train_batch["bboxes"].to(device))
+                            fgmask_target = torch.cat([train_batch["batch_idx"].unsqueeze(1), train_batch["cls"], train_batch["bboxes"]], dim=-1).to(device)
+                            t_masks = fgmask_hook.get_mask(fgmask_target)
+                            for i, (t_feature, s_feature, t_mask) in enumerate(zip(t_features, s_features, t_masks)):
+                                t_feature = t_feature.detach()
+                                s_feature = student_adaptive_layer[i](s_feature)
+                                t_mask = t_mask.detach()
+                                fgmask_loss += imitation_loss(t_feature, s_feature, t_mask) * 0.01
+                        loss += fgmask_loss
                     if RANK != -1:
                         loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
                     if opt.quad:
