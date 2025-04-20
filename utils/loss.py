@@ -694,5 +694,9 @@ class Distillation_Hook:
         for handle in self.remove_handle:
             handle.remove()
                 
+def KD_loss(p, q, Temp=2.0):  
+    pt = F.softmax(p / Temp, dim=1)
+    ps = F.log_softmax(q / Temp, dim=1)
+    return nn.KLDivLoss(reduction='mean')(ps, pt) * (Temp**2)
         
         

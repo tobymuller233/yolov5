@@ -69,7 +69,7 @@ from utils.torch_utils import (
     smartCrossEntropyLoss,
     torch_distributed_zero_first,
 )
-from utils.loss import FeatureLoss, Distillation_Hook
+from utils.loss import FeatureLoss, Distillation_Hook, KD_loss
 
 LOCAL_RANK = int(os.getenv("LOCAL_RANK", -1))  # https://pytorch.org/docs/stable/elastic/run.html
 RANK = int(os.getenv("RANK", -1))
@@ -238,10 +238,14 @@ def train(opt, device):
             # Forward
             with amp.autocast(enabled=cuda):  # stability issues when enabled
                 pred = model(images)
+                klloss = 0
                 if opt.teacher_weights:
                     with torch.no_grad():
                         t_pred = t_model(images)
+                    if opt.KLloss:
+                        klloss = KD_loss(t_pred, pred, opt.KLloss)  
                 dist_loss = dist_hook.get_loss() if opt.teacher_weights else torch.tensor(0).to(device)
+                dist_loss += klloss
                 loss = criterion(pred, labels)
                 loss += dist_loss
                 # loss = criterion(model(images), labels)
@@ -347,6 +351,7 @@ def parse_opt(known=False):
     parser.add_argument("--teacher-weights", type=str, default=None, help="teacher model weights path")
     parser.add_argument("--dist", type=str, nargs="?", const="cwd", help="cwd, mgd, maskd")
     parser.add_argument("--dist-hyp", type=str, default=None, help="distillation hyperparameters")
+    parser.add_argument("--KLloss", type=float, default=None, help="whether to use KL loss on the last layer")
     parser.add_argument("--data", type=str, default="imagenette160", help="cifar10, cifar100, mnist, imagenet, ...")
     parser.add_argument("--epochs", type=int, default=10, help="total training epochs")
     parser.add_argument("--batch-size", type=int, default=64, help="total batch size for all GPUs")

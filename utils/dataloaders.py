@@ -1423,7 +1423,7 @@ def create_classification_dataloader(
         shuffle=shuffle and sampler is None,
         num_workers=nw,
         sampler=sampler,
-        pin_memory=PIN_MEMORY,
+        pin_memory=False,   # 永远禁止
         worker_init_fn=seed_worker,
         generator=generator,
     )  # or DataLoader(persistent_workers=True)
