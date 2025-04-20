@@ -62,6 +62,7 @@ from utils.general import (
     scale_boxes,
     strip_optimizer,
     xyxy2xywh,
+    non_max_suppression_anchorfree
 )
 from utils.torch_utils import select_device, smart_inference_mode
 
@@ -98,7 +99,8 @@ def run(
     dnn=False,  # use OpenCV DNN for ONNX inference
     vid_stride=1,  # video frame-rate stride
     maskd_hyp=None,
-    mask_weight=None
+    mask_weight=None,
+    anchorfree=False
 ):
     """
     Runs YOLOv5 detection inference on various sources like images, videos, directories, streams, etc.
@@ -218,8 +220,13 @@ def run(
         if opt.maskd_hyp:
             mask_hook.reset_loss()
         # NMS
-        with dt[2]:
-            pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+        if not anchorfree:
+            with dt[2]:
+                pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+        else:
+            with dt[2]:
+                pred = non_max_suppression_anchorfree(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+                pass
 
         # Second-stage classifier (optional)
         # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
@@ -415,6 +422,7 @@ def parse_opt():
 
     parser.add_argument("--maskd-hyp", type=str, default=None, help="Use hook to visualize masked feature maps")
     parser.add_argument("--mask-weight", type=str, default=None, help="Path to the mask module weights")
+    parser.add_argument("--anchorfree", action="store_true", help="Use anchor-free detection")
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
     print_args(vars(opt))
