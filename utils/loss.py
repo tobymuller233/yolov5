@@ -200,6 +200,7 @@ class ComputeLoss:
         # Losses
         for i, pi in enumerate(p):  # layer index, layer predictions
             # teacher model prediction
+            # [bs, 3, h, w, 5 + nc]
             t_pi = t_p[i]
             t_obj_scale = t_pi[..., 4].sigmoid()
 
@@ -501,6 +502,83 @@ class BboxLoss(nn.Module):
 
         return loss_iou, loss_dfl
 
+class v8DistillationLoss(v8DetectionLoss):
+    def __init__(self, student_model, teacher_model, distill_weight=1.0, tal_topk=10):
+        super().__init__(student_model, tal_topk)
+        self.teacher_model = teacher_model
+        self.distill_weight = distill_weight
+        
+        # 冻结教师模型参数
+        for param in teacher_model.parameters():
+            param.requires_grad = False
+            
+    def __call__(self, preds, batch):
+        # 学生模型原始损失计算
+        org_loss, loss_items = super().__call__(preds, batch)
+        
+        # stu_metric = self.stu_maskpos   # 学生模型的topkmetric
+        # 提取特征图和相关张量
+        feats = preds[1] if isinstance(preds, tuple) else preds
+        pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
+            (self.reg_max * 4, self.nc), 1
+        )
+        pred_scores = pred_scores.permute(0, 2, 1).contiguous()
+        pred_distri = pred_distri.permute(0, 2, 1).contiguous()
+        
+        # 计算锚点和尺度张量
+        anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
+        pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # [b, h*w, 4]
+        
+        # 获取教师模型预测
+        with torch.no_grad():
+            t_preds = self.teacher_model(batch["img"])
+            t_feats = t_preds[1] if isinstance(t_preds, tuple) else t_preds
+            t_pred_distri, t_pred_scores = torch.cat([xi.view(t_feats[0].shape[0], self.no, -1) for xi in t_feats], 2).split(
+                (self.reg_max * 4, self.nc), 1
+            )
+            t_pred_scores = t_pred_scores.permute(0, 2, 1).contiguous()
+            t_pred_distri = t_pred_distri.permute(0, 2, 1).contiguous()
+            t_pred_bboxes = self.bbox_decode(anchor_points, t_pred_distri)
+            # 获取教师模型的前景区域掩码
+            # 使用TAL分配器获取教师模型认为的重要区域
+            targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["bboxes"]), 1)
+            batch_size = pred_scores.shape[0]
+            imgsz = torch.tensor(feats[0].shape[2:], device=self.device, dtype=pred_scores.dtype) * self.stride[0]
+            targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
+            gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
+            mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
+            
+            # 使用教师模型的预测获取掩码
+            t_scores_sigmoid = t_pred_scores.detach().sigmoid()
+            t_maskpos, _, _ = self.assigner.get_pos_mask(
+                t_scores_sigmoid,
+                (t_pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
+                gt_labels,
+                gt_bboxes,
+                anchor_points * stride_tensor,
+                mask_gt
+            )
+            
+            # t_maskpos的shape是[batch_size, num_gt, num_anchors]
+            # 获取前景掩码
+            t_fg_mask = t_maskpos.sum(1).bool()  # (batch_size, num_anchors)
+        
+        # 计算蒸馏损失
+        # dist_loss_reg = F.mse_loss(pred_distri, t_pred_distri)  # 回归预测分布蒸馏
+        dist_loss_reg = F.mse_loss(
+            pred_bboxes[t_fg_mask], t_pred_bboxes[t_fg_mask], reduction='mean'
+        )
+        dist_loss_cls = F.kl_div(
+            F.log_softmax(pred_scores[t_fg_mask], dim=-1),
+            F.softmax(t_pred_scores[t_fg_mask], dim=-1),
+            reduction='batchmean'
+        )
+        
+        # 总蒸馏损失
+        distill_loss = (dist_loss_reg + dist_loss_cls) * self.distill_weight
+        
+        # 返回学生原始损失加上蒸馏损失
+        return org_loss, distill_loss, loss_items
 # fgmask KD loss
 def imitation_loss(teacher, student, mask):
     if student is None or teacher is None:

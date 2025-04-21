@@ -65,7 +65,7 @@ from utils.general import (
 )
 from utils.loggers import LOGGERS, Loggers, DistType
 from utils.loggers.comet.comet_utils import check_comet_resume
-from utils.loss import ComputeLoss, v8DetectionLoss, imitation_loss
+from utils.loss import ComputeLoss, v8DetectionLoss, imitation_loss, v8DistillationLoss
 from utils.metrics import fitness
 from utils.plots import plot_evolve
 from utils.torch_utils import (
@@ -379,10 +379,11 @@ def train(hyp, opt, device, callbacks):
     scaler = torch.cuda.amp.GradScaler(enabled=amp)
     stopper, stop = EarlyStopping(patience=opt.patience), False
 
-    if "anchorfree" in opt.cfg:
+    if "anchorfree" in opt.cfg and opt.teacher_weights:
         # DONE: anchorfree loss
         model.args = model.hyp
-        compute_loss = v8DetectionLoss(model)
+        # compute_loss = v8DetectionLoss(model)
+        compute_loss = v8DistillationLoss(model, t_model)
     else:   # normal mode
         compute_loss = ComputeLoss(model)  # init loss class
     callbacks.run("on_train_start")
@@ -458,7 +459,8 @@ def train(hyp, opt, device, callbacks):
                             with torch.no_grad():
                                 t_pred = t_model(imgs)
                                 if opt.fmnms:
-                                    t_pred = ComputeLoss.apply_fmnms(t_pred, 3)
+                                    for ti_pred in t_pred:
+                                        ti_pred = ComputeLoss.apply_fmnms(ti_pred, 3)
                             loss, loss_items = compute_loss(pred, targets.to(device))
                             loss, dist_loss = compute_loss.dist_loss(pred, t_pred, loss)
                             pass
@@ -474,7 +476,10 @@ def train(hyp, opt, device, callbacks):
                                 ns = [math.ceil(x * sf / gs) * gs for x in train_batch["img"].shape[2:]]
                                 train_batch["img"] = nn.functional.interpolate(train_batch["img"], size=ns, mode="bilinear", align_corners=False)
                         pred = model(train_batch["img"])
-                        loss, loss_items = compute_loss(pred, train_batch)
+                        if opt.teacher_weights:
+                            loss, dist_loss, loss_items = compute_loss(pred, train_batch)
+                        else:
+                            loss, loss_items = compute_loss(pred, train_batch)
                     if RANK != -1:
                         loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
                     if opt.quad:
