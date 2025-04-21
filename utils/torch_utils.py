@@ -632,10 +632,10 @@ class TaskAlignedAssigner(nn.Module):
 
         # Normalize
         align_metric *= mask_pos
-        pos_align_metrics = align_metric.amax(dim=-1, keepdim=True)  # b, max_num_obj
+        pos_align_metrics = align_metric.amax(dim=-1, keepdim=True)  # b, max_num_obj, 1
         pos_overlaps = (overlaps * mask_pos).amax(dim=-1, keepdim=True)  # b, max_num_obj
-        norm_align_metric = (align_metric * pos_overlaps / (pos_align_metrics + self.eps)).amax(-2).unsqueeze(-1)
-        target_scores = target_scores * norm_align_metric
+        norm_align_metric = (align_metric * pos_overlaps / (pos_align_metrics + self.eps)).amax(-2).unsqueeze(-1)   # b, max_num_obj, 1
+        target_scores = target_scores * norm_align_metric   # b, num_total_anchors, num_classes
 
         return target_labels, target_bboxes, target_scores, fg_mask.bool(), target_gt_idx
 
