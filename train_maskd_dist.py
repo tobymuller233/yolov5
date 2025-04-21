@@ -694,6 +694,8 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
                 strip_optimizer(f)  # strip optimizers
                 if f is best:
                     LOGGER.info(f"\nValidating {f}...")
+                    if loggers.keys[3] != "metrics/precision":
+                        loggers.keys.pop(3)
                     results, _, _ = validate.run(
                         data_dict,
                         batch_size=batch_size // WORLD_SIZE * 2,
