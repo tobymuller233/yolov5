@@ -214,6 +214,7 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
         t_ckpt = torch.load(t_weights, map_location="cpu")  # load checkpoint to CPU to avoid CUDA memory leak
         t_model = t_ckpt["model"].float().to(device)
     # Mask Loss
+    t_model.train()
     for n, p in t_model.named_parameters():
         p.requires_grad = False  # freeze teacher model
     for n, m in t_model.named_modules():
@@ -566,9 +567,13 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
                 with torch.cuda.amp.autocast(amp):
                     if targets is not None: # not v8loader
                         pred = model(imgs)  # forward
+                        reg_loss = 0
                         with torch.no_grad():
                             t_pred = t_model(imgs)
                         loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                        if opt.yoloreg:
+                            loss, reg_loss = compute_loss.dist_loss(pred, t_pred, loss)
+                        
                     else:   # V8 LOADER
                         train_batch["img"] = train_batch["img"].to(device, non_blocking=True).float() / 255
                         if opt.multi_scale:
@@ -728,6 +733,7 @@ def parse_opt(known=False):
     parser.add_argument("--maskd-hyp", type=str, default=ROOT / "data/maskd/default.yaml", help="maskd hyperparameters")
     parser.add_argument("--mask-only", action="store_true", help="train mask module only")
     parser.add_argument("--mask-weight", type=str, default=None, help="mask module weight path")
+    parser.add_argument("--yoloreg", action="store_true", help="use yoloreg")
 
     parser.add_argument("--data", type=str, default=ROOT / "data/coco128.yaml", help="dataset.yaml path")
     parser.add_argument("--hyp", type=str, default=ROOT / "data/hyps/hyp.scratch-low.yaml", help="hyperparameters path")
