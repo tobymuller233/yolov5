@@ -194,13 +194,16 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
         with torch_distributed_zero_first(LOCAL_RANK):
             weights = attempt_download(weights)  # download if not found locally
         ckpt = torch.load(weights, map_location="cpu")  # load checkpoint to CPU to avoid CUDA memory leak
-        model = ckpt["model"].float().to(device)
-        # model = Model(cfg or ckpt["model"].yaml, ch=3, nc=nc, anchors=hyp.get("anchors")).to(device)  # create
-        # exclude = ["anchor"] if (cfg or hyp.get("anchors")) and not resume else []  # exclude keys
-        # csd = ckpt["model"].float().state_dict()  # checkpoint state_dict as FP32
-        # csd = intersect_dicts(csd, model.state_dict(), exclude=exclude)  # intersect
-        # model.load_state_dict(csd, strict=False)  # load
-        # LOGGER.info(f"Transferred {len(csd)}/{len(model.state_dict())} items from {weights}")  # report
+        if not opt.use_cfg or not opt.cfg:
+            model = ckpt["model"].float().to(device)
+        else:
+            LOGGER.info(f"Creating model from {cfg}...")
+            model = Model(cfg or ckpt["model"].yaml, ch=3, nc=nc, anchors=hyp.get("anchors")).to(device)  # create
+            exclude = ["anchor"] if (cfg or hyp.get("anchors")) and not resume else []  # exclude keys
+            csd = ckpt["model"].float().state_dict()  # checkpoint state_dict as FP32
+            csd = intersect_dicts(csd, model.state_dict(), exclude=exclude)  # intersect
+            model.load_state_dict(csd, strict=False)  # load
+            LOGGER.info(f"Transferred {len(csd)}/{len(model.state_dict())} items from {weights}")  # report
     else:
         model = Model(cfg, ch=3, nc=nc, anchors=hyp.get("anchors")).to(device)  # create
     m = model.model[-1]
@@ -734,6 +737,7 @@ def parse_opt(known=False):
     parser.add_argument("--mask-only", action="store_true", help="train mask module only")
     parser.add_argument("--mask-weight", type=str, default=None, help="mask module weight path")
     parser.add_argument("--yoloreg", action="store_true", help="use yoloreg")
+    parser.add_argument("--use-cfg", action="store_true", help="use cfg to create model")
 
     parser.add_argument("--data", type=str, default=ROOT / "data/coco128.yaml", help="dataset.yaml path")
     parser.add_argument("--hyp", type=str, default=ROOT / "data/hyps/hyp.scratch-low.yaml", help="hyperparameters path")
