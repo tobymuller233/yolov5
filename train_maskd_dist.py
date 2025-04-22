@@ -262,8 +262,8 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
             return (1 - x / epochs) * (1.0 - hyp["lrf"]) + hyp["lrf"]  # linear
 
     mask_scheduler = lr_scheduler.CosineAnnealingLR(mask_optimizer, eta_min=hyp["maskd_mask_lr"]["min_lr"], T_max=hyp["maskd_mask_trainiter"])
-    # scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)  # plot_lr_scheduler(optimizer, scheduler, epochs)
-    scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[int(opt.epochs * 8 / 25), int(opt.epochs * 11 / 25)], gamma=0.1)  # plot_lr_scheduler(optimizer, scheduler, epochs)
+    scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)  # plot_lr_scheduler(optimizer, scheduler, epochs)
+    # scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[int(opt.epochs * 8 / 25), int(opt.epochs * 11 / 25)], gamma=0.1)  # plot_lr_scheduler(optimizer, scheduler, epochs)
     # EMA
     ema = ModelEMA(model) if RANK in {-1, 0} else None
     ema_mask = ModelEMA(mask_model) if RANK in {-1, 0} else None

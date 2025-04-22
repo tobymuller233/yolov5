@@ -241,7 +241,8 @@ class Distillation_Loss:
                                   weight_mask=hyp["maskd_weightmask"],
                                   custom_mask=hyp["maskd_custom_mask"],
                                   custom_mask_warmup=hyp["maskd_custom_mask_warmup"],
-                                  pretrained=pretrained_mask,).to(device)
+                                  pretrained=pretrained_mask,
+                                  loss_weight=hyp["maskd_masklossweight"]).to(device)
     
     def register_hook(self):
         self.student_outputs = []

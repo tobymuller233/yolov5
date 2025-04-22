@@ -17,7 +17,7 @@ maskd_mask_optimizer: {
 
 # distillation
 maskd_stuwarmup: 1    # by epoch
-maskd_masklossweight: 1.0
+maskd_masklossweight: 0.5
 maskd_reglossweight: 1.0
 maskd_custom_mask: True  # whether to use custom mask
 maskd_custom_mask_warmup: 1000  # until which student mask would not be used
