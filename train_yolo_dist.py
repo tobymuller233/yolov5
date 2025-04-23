@@ -65,7 +65,7 @@ from utils.general import (
 )
 from utils.loggers import LOGGERS, Loggers, DistType
 from utils.loggers.comet.comet_utils import check_comet_resume
-from utils.loss import ComputeLoss, v8DetectionLoss, imitation_loss, v8DistillationLoss
+from utils.loss import ComputeLoss, v8DetectionLoss, imitation_loss, v8DistillationLoss, Distillation_Hook
 from utils.metrics import fitness
 from utils.plots import plot_evolve
 from utils.torch_utils import (
@@ -384,6 +384,11 @@ def train(hyp, opt, device, callbacks):
         model.args = model.hyp
         # compute_loss = v8DetectionLoss(model)
         compute_loss = v8DistillationLoss(model, t_model)
+        if opt.chdist:
+            with open(opt.dist_hyp, errors="ignore") as f:
+                dist_hyp = yaml.safe_load(f)
+            dist_hook = Distillation_Hook(model, t_model, dist_hyp, opt.chdist, device=device)
+            dist_hook.register_hook()
     else:   # normal mode
         compute_loss = ComputeLoss(model)  # init loss class
     callbacks.run("on_train_start")
@@ -462,7 +467,13 @@ def train(hyp, opt, device, callbacks):
                                     for ti_pred in t_pred:
                                         ti_pred = ComputeLoss.apply_fmnms(ti_pred, 3)
                             loss, loss_items = compute_loss(pred, targets.to(device))
+                            if opt.chdist:
+                                chdist_loss = dist_hook.get_loss()
+                            else:
+                                chdist_loss = torch.tensor(0).to(device)
                             loss, dist_loss = compute_loss.dist_loss(pred, t_pred, loss)
+                            dist_loss += chdist_loss
+                            loss += chdist_loss
                             pass
                         else:
                             pred = model(imgs)  # forward
@@ -653,6 +664,8 @@ def parse_opt(known=False):
     parser.add_argument("--cfg", type=str, default="", help="model.yaml path")
     parser.add_argument("--teacher-weights", type=str, default=ROOT / "weights/yolov5l.pt", help="teacher weights path")
     parser.add_argument("--fmnms", action="store_true", help="use feature map NMS")
+    parser.add_argument("--chdist", type=str, default=None, help="use channel dist")
+    parser.add_argument("--chdist-hyp", type=str, default=ROOT/ "data/dist/yolov5n_v5s_cwd.yaml", help="channel dist hyperparameters")
 
     parser.add_argument("--data", type=str, default=ROOT / "data/coco128.yaml", help="dataset.yaml path")
     parser.add_argument("--hyp", type=str, default=ROOT / "data/hyps/hyp.scratch-low.yaml", help="hyperparameters path")

@@ -731,6 +731,7 @@ class Distillation_Hook:
         self.t_model = t_model
         self.dist_hyp = dist_hyp
         self.dist = dist
+        self.loss_weight = dist_hyp["dist_loss_weight"]
 
         self.s_channels = dist_hyp["dist_stu_channels"]
         self.t_channels = dist_hyp["dist_tea_channels"]
@@ -746,7 +747,7 @@ class Distillation_Hook:
             if name in dist_hyp["dist_modules"]:
                 self.student_module_pairs.append(m)
         
-        self.dist_loss_fn = FeatureLoss(self.s_channels, self.t_channels, distiller=dist, loss_weight=dist_hyp["dist_loss_weight"], device=device)
+        self.dist_loss_fn = FeatureLoss(self.s_channels, self.t_channels, distiller=dist, loss_weight=self.loss_weight, device=device)
         
     def register_hook(self):
         self.teacher_outputs = []
