@@ -216,6 +216,8 @@ def run(
     callbacks=Callbacks(),
     compute_loss=None,
     v8loader=False,
+    maskd_hyp=None,
+    mask_weight=None,
 ):
     """
     Evaluates a YOLOv5 model on a dataset and logs performance metrics.
@@ -316,6 +318,14 @@ def run(
             v8loader=v8loader,
         )[0]
 
+    if maskd_hyp:
+        from models.maskd import MaskModules, Mask_Loss
+        import yaml
+        
+        maskd_hyp = yaml.safe_load(open(maskd_hyp, "r"))
+        maskmodules = MaskModules(maskd_hyp["maskd_tea_channels"], pretrained=mask_weight).to(device)
+        mask_hook = Mask_Loss(model.model, maskd_hyp, maskmodules, device=device)
+        mask_hook.register_hook()
     seen = 0
     confusion_matrix = ConfusionMatrix(nc=nc)
     names = model.names if hasattr(model, "names") else model.module.names  # get class names
@@ -344,7 +354,9 @@ def run(
             # Inference
             with dt[1]:
                 preds, train_out = model(im) if compute_loss else (model(im, augment=augment), None)
-
+                
+            if maskd_hyp:
+                mask_hook.reset_loss()
             # Loss
             if compute_loss:
                 loss += compute_loss(train_out, targets)[1]  # box, obj/dfl, cls
@@ -370,6 +382,8 @@ def run(
             with dt[1]:
                 preds, train_out = model(batch["img"]) if compute_loss else (model(batch["img"], augment=augment), None)
 
+            if maskd_hyp:
+                mask_hook.reset_loss()
             if compute_loss:
                 loss += compute_loss(train_out, batch)[1]
             
@@ -586,6 +600,8 @@ def parse_opt():
     parser.add_argument("--half", action="store_true", help="use FP16 half-precision inference")
     parser.add_argument("--dnn", action="store_true", help="use OpenCV DNN for ONNX inference")
     parser.add_argument("--v8loader", action="store_true", help="use v8 dataloader")
+    parser.add_argument("--maskd-hyp", type=str, default=None, help="maskd hyp")
+    parser.add_argument("--mask-weight", type=str, default=None, help="mask weight")
     opt = parser.parse_args()
     opt.data = check_yaml(opt.data)  # check YAML
     opt.save_json |= opt.data.endswith("coco.yaml")
