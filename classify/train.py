@@ -318,7 +318,7 @@ def train(opt, device):
                 del ckpt
 
     if opt.teacher_weights:
-        dist_hook.remove_handle()
+        dist_hook.remove_handle_()
     # Train complete
     if RANK in {-1, 0} and final_epoch:
         LOGGER.info(
