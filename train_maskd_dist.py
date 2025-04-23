@@ -200,7 +200,10 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
             LOGGER.info(f"Creating model from {cfg}...")
             model = Model(cfg or ckpt["model"].yaml, ch=3, nc=nc, anchors=hyp.get("anchors")).to(device)  # create
             exclude = ["anchor"] if (cfg or hyp.get("anchors")) and not resume else []  # exclude keys
-            csd = ckpt["model"].float().state_dict()  # checkpoint state_dict as FP32
+            if ckpt["model"] is not None:
+                csd = ckpt["model"].float().state_dict()  # checkpoint state_dict as FP32
+            else:
+                csd = ckpt["ema"].float().state_dict()  # EMA state_dict as FP32  
             csd = intersect_dicts(csd, model.state_dict(), exclude=exclude)  # intersect
             model.load_state_dict(csd, strict=False)  # load
             LOGGER.info(f"Transferred {len(csd)}/{len(model.state_dict())} items from {weights}")  # report
@@ -215,7 +218,17 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
     with torch_distributed_zero_first(LOCAL_RANK):
         t_weights = attempt_download(opt.teacher_weights)  # download if not found locally
         t_ckpt = torch.load(t_weights, map_location="cpu")  # load checkpoint to CPU to avoid CUDA memory leak
-        t_model = t_ckpt["model"].float().to(device)
+        if not opt.use_tea_cfg or not opt.tea_cfg:
+            t_model = t_ckpt["model"].float().to(device)
+        else:
+            LOGGER.info(f"Creating model from {opt.tea_cfg}...")
+            t_model = Model(opt.tea_cfg or t_ckpt["model"].yaml, ch=3, nc=nc, anchors=hyp.get("anchors")).to(device)
+            exclude = ["anchor"] if (opt.tea_cfg or hyp.get("anchors")) and not resume else []  # exclude keys
+            t_csd = t_ckpt["model"].float().state_dict()  # checkpoint state_dict as FP32
+            t_csd = intersect_dicts(t_csd, t_model.state_dict(), exclude=exclude)  # intersect
+            t_model.load_state_dict(t_csd, strict=False)  # load
+            LOGGER.info(f"Transferred {len(t_csd)}/{len(t_model.state_dict())} items from {opt.teacher_weights}")
+            
     # Mask Loss
     t_model.train()
     for n, p in t_model.named_parameters():
@@ -738,6 +751,8 @@ def parse_opt(known=False):
     parser.add_argument("--mask-weight", type=str, default=None, help="mask module weight path")
     parser.add_argument("--yoloreg", action="store_true", help="use yoloreg")
     parser.add_argument("--use-cfg", action="store_true", help="use cfg to create model")
+    parser.add_argument("--tea-cfg", type=str, default=None, help="teacher model cfg")
+    parser.add_argument("--use-tea-cfg", action="store_true", help="use cfg to create teacher model")
 
     parser.add_argument("--data", type=str, default=ROOT / "data/coco128.yaml", help="dataset.yaml path")
     parser.add_argument("--hyp", type=str, default=ROOT / "data/hyps/hyp.scratch-low.yaml", help="hyperparameters path")

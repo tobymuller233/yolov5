@@ -222,6 +222,8 @@ def plot_images(images, targets, paths=None, fname="images.jpg", names=None):
             for j, box in enumerate(boxes.T.tolist()):
                 cls = classes[j]
                 color = colors(cls)
+                if cls > 19:
+                    print()
                 cls = names[cls] if names else cls
                 if labels or conf[j] > 0.25:  # 0.25 conf thresh
                     label = f"{cls}" if labels else f"{cls} {conf[j]:.1f}"
