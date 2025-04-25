@@ -26,7 +26,7 @@ def smooth(y, f=0.05):
     return np.convolve(yp, np.ones(nf) / nf, mode="valid")  # y-smoothed
 
 
-def ap_per_class(tp, conf, pred_cls, target_cls, plot=False, save_dir=".", names=(), eps=1e-16, prefix=""):
+def ap_per_class(tp, conf, pred_cls, target_cls, plot=False, save_dir=".", names=(), eps=1e-16, prefix="", is_KITTI=False):
     """
     Compute the average precision, given the recall and precision curves.
 
@@ -38,6 +38,7 @@ def ap_per_class(tp, conf, pred_cls, target_cls, plot=False, save_dir=".", names
         target_cls:  True object classes (nparray).
         plot:  Plot precision-recall curve at mAP@0.5
         save_dir:  Plot save directory
+        is_KITTI: 是否为KITTI数据集，决定是否特殊处理dontcare类别
     # Returns
         The average precision as computed in py-faster-rcnn.
     """
@@ -90,7 +91,26 @@ def ap_per_class(tp, conf, pred_cls, target_cls, plot=False, save_dir=".", names
     i = smooth(f1.mean(0), 0.1).argmax()  # max F1 index
     p, r, f1 = p[:, i], r[:, i], f1[:, i]
     tp = (r * nt).round()  # true positives
-    fp = (tp / (p + eps) - tp).round()  # false positives
+    
+    # 处理dontcare类别（假设dontcare类别的标签为3）
+    if is_KITTI:
+        dontcare_idx = -1
+        for idx, cls_id in enumerate(unique_classes):
+            if cls_id == 3:  # dontcare类别ID
+                dontcare_idx = idx
+                break
+                
+        if dontcare_idx >= 0:
+            # 计算false positives时排除dontcare类别
+            valid_indices = [i for i in range(len(unique_classes)) if i != dontcare_idx]
+            valid_tp = tp[valid_indices]
+            valid_p = p[valid_indices]
+            fp = (valid_tp / (valid_p + eps) - valid_tp).round()  # false positives
+        else:
+            fp = (tp / (p + eps) - tp).round()  # false positives
+    else:
+        fp = (tp / (p + eps) - tp).round()  # false positives
+        
     return tp, fp, p, r, f1, ap, unique_classes.astype(int)
 
 
@@ -124,12 +144,13 @@ def compute_ap(recall, precision):
 class ConfusionMatrix:
     """Generates and visualizes a confusion matrix for evaluating object detection classification performance."""
 
-    def __init__(self, nc, conf=0.25, iou_thres=0.45):
+    def __init__(self, nc, conf=0.25, iou_thres=0.45, is_KITTI=False):
         """Initializes ConfusionMatrix with given number of classes, confidence, and IoU threshold."""
         self.matrix = np.zeros((nc + 1, nc + 1))
         self.nc = nc  # number of classes
         self.conf = conf
         self.iou_thres = iou_thres
+        self.is_KITTI = is_KITTI
 
     def process_batch(self, detections, labels):
         """
@@ -146,13 +167,46 @@ class ConfusionMatrix:
         if detections is None:
             gt_classes = labels.int()
             for gc in gt_classes:
-                self.matrix[self.nc, gc] += 1  # background FN
+                # 如果类别是dontcare (3)且启用了KITTI模式，不计入漏检（false negative）
+                if not self.is_KITTI or gc != 3:  # dontcare类别
+                    self.matrix[self.nc, gc] += 1  # background FN
             return
 
         detections = detections[detections[:, 4] > self.conf]
         gt_classes = labels[:, 0].int()
         detection_classes = detections[:, 5].int()
         iou = box_iou(labels[:, 1:], detections[:, :4])
+
+        # 如果启用KITTI模式，处理dontcare类别
+        if self.is_KITTI:
+            # 找出所有dontcare标签的索引
+            dontcare_indices = (gt_classes == 3).nonzero(as_tuple=True)[0]
+            
+            # 如果有dontcare标签，检查检测结果是否与dontcare区域重叠
+            if len(dontcare_indices) > 0:
+                # 提取dontcare区域的IoU
+                dontcare_ious = iou[dontcare_indices]
+                
+                # 对每个检测结果，找出与dontcare区域的最大IoU
+                max_dontcare_iou, _ = dontcare_ious.max(dim=0)
+                
+                # 标记与dontcare区域重叠的检测结果
+                overlapped_with_dontcare = max_dontcare_iou > self.iou_thres
+                
+                # 过滤掉与dontcare区域重叠的检测结果
+                if torch.any(overlapped_with_dontcare):
+                    valid_detections = ~overlapped_with_dontcare
+                    detections = detections[valid_detections]
+                    detection_classes = detection_classes[valid_detections]
+                    # 更新IoU矩阵，排除掉与dontcare区域重叠的检测结果
+                    iou = iou[:, valid_detections]
+            
+            # 过滤掉dontcare类别的标签
+            non_dontcare_indices = (gt_classes != 3).nonzero(as_tuple=True)[0]
+            if len(non_dontcare_indices) < len(gt_classes):
+                labels = labels[non_dontcare_indices]
+                gt_classes = gt_classes[non_dontcare_indices]
+                iou = iou[non_dontcare_indices]
 
         x = torch.where(iou > self.iou_thres)
         if x[0].shape[0]:

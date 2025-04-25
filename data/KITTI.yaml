@@ -1,0 +1,14 @@
+path: ./datasets/KITTI  # dataset root dir
+train: # train images
+  - bm_train/images
+val: # val images
+  - bm_val/images
+# test: # test images (optional)
+#   - test/images
+
+# Classes
+names:
+  0: Car
+  1: Pedestrian 
+  2: Cyclist
+  3: DontCare

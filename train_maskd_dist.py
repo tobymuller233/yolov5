@@ -589,6 +589,13 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
                         loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
                         if opt.yoloreg:
                             loss, reg_loss = compute_loss.dist_loss(pred, t_pred, loss)
+                        else:
+                            DistLoss = nn.MSELoss(reduction="none")
+                            reg_loss = torch.tensor(0.).to(device)
+                            for pi, t_pi in zip(pred, t_pred):
+                                reg_loss += torch.mean(DistLoss(pi, t_pi)) * opt.batch_size
+                            loss += reg_loss
+                            
                         
                     else:   # V8 LOADER
                         train_batch["img"] = train_batch["img"].to(device, non_blocking=True).float() / 255
