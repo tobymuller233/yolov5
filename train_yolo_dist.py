@@ -385,12 +385,17 @@ def train(hyp, opt, device, callbacks):
         # compute_loss = v8DetectionLoss(model)
         compute_loss = v8DistillationLoss(model, t_model)
         if opt.chdist:
-            with open(opt.dist_hyp, errors="ignore") as f:
+            with open(opt.chdist_hyp, errors="ignore") as f:
                 dist_hyp = yaml.safe_load(f)
             dist_hook = Distillation_Hook(model, t_model, dist_hyp, opt.chdist, device=device)
-            dist_hook.register_hook()
+            # dist_hook.register_hook()
     else:   # normal mode
         compute_loss = ComputeLoss(model)  # init loss class
+        if opt.chdist:
+            with open(opt.chdist_hyp, errors="ignore") as f:
+                dist_hyp = yaml.safe_load(f)
+            dist_hook = Distillation_Hook(model, t_model, dist_hyp, opt.chdist, device=device)
+            # dist_hook.register_hook()
     callbacks.run("on_train_start")
     LOGGER.info(
         f"Image sizes {imgsz} train, {imgsz} val\n"
@@ -428,6 +433,8 @@ def train(hyp, opt, device, callbacks):
         if RANK in {-1, 0}:
             pbar = tqdm(pbar, total=nb, bar_format=TQDM_BAR_FORMAT)  # progress bar
         optimizer.zero_grad()
+        if opt.chdist:
+            dist_hook.register_hook()
         for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
             train_batch = imgs
             callbacks.run("on_train_batch_start")
@@ -540,7 +547,8 @@ def train(hyp, opt, device, callbacks):
         # Scheduler
         lr = [x["lr"] for x in optimizer.param_groups]  # for loggers
         scheduler.step()
-        
+        if opt.chdist:
+            dist_hook.remove_handle_()
         if RANK in {-1, 0}:
             # mAP
             callbacks.run("on_train_epoch_end", epoch=epoch)
