@@ -510,7 +510,8 @@ def train(hyp, opt, device, callbacks):
                     plots=False,
                     callbacks=callbacks,
                     compute_loss=compute_loss,
-                    is_KITTI="KITTI" in opt.data,
+                    # is_KITTI="KITTI" in opt.data,
+                    is_KITTI=False
                 )
 
             # Update best mAP

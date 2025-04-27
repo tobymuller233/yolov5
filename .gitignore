@@ -39,6 +39,7 @@ data/images/*
 # !data/dist
 
 results*.csv
+!thesis_results/results.csv
 
 # Datasets -------------------------------------------------------------------------------------------------------------
 coco/

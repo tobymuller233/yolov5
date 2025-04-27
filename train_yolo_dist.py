@@ -462,6 +462,8 @@ def train(hyp, opt, device, callbacks):
                     imgs = nn.functional.interpolate(imgs, size=ns, mode="bilinear", align_corners=False)
 
             # Forward
+            if opt.chdist:
+                dist_hook.reset_outputs()
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 with torch.cuda.amp.autocast(amp):
@@ -480,7 +482,7 @@ def train(hyp, opt, device, callbacks):
                                 chdist_loss = torch.tensor(0).to(device)
                             loss, dist_loss = compute_loss.dist_loss(pred, t_pred, loss)
                             dist_loss += chdist_loss
-                            loss += chdist_loss
+                            loss += chdist_loss 
                             pass
                         else:
                             pred = model(imgs)  # forward

@@ -476,7 +476,7 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
                         if opt.quad:
                             loss *= 4.0
                         maskd_loss = mask_loss.get_loss()
-                        loss += maskd_loss
+                        loss += maskd_loss * hyp.getattr("maskd_maskloss_weight", 1.0)
                 # Backward
                 scaler.scale(loss).backward()
                 mask_loss.reset_loss()
@@ -693,6 +693,7 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
                     "opt": vars(opt),
                     "git": GIT_INFO,  # {remote, branch, commit} if a git repo
                     "date": datetime.now().isoformat(),
+                    "adaptive_layer": deepcopy(dist_loss.Distloss.align_modules).half()
                 }
 
                 # Save last, best and delete

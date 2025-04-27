@@ -134,7 +134,9 @@ class MasKDLoss(nn.Module):
             # masked distillation
             loss = (masked_y_s - masked_y_t)**2
             loss = loss.sum((3, 4))  # [N, n_masks, C]
-            loss = loss / mask.sum((2, 3)).unsqueeze(-1)
+            eps = 1e-12
+            eps = loss.new_ones(mask.sum((2, 3)).shape) * eps
+            loss = loss / (mask.sum((2, 3)).unsqueeze(-1) + eps.unsqueeze(-1))
             if self.weight_mask:
                 weights = mask_module.forward_prob(y_t).flatten(1)  # [N, T]
                 loss = (loss.mean(-1) * weights).sum(-1)

@@ -769,6 +769,10 @@ class Distillation_Hook:
         self.teacher_outputs.clear()
         return loss
     
+    def reset_outputs(self):
+        self.student_outputs.clear()
+        self.teacher_outputs.clear()
+        
     def remove_handle_(self):
         for handle in self.remove_handle:
             handle.remove()
