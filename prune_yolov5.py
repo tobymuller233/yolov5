@@ -210,5 +210,6 @@ if __name__ == "__main__":
         prune_ratio = ratio
         # print(model)
         old_model['model'] = model
+        old_model['ema'] = model
         # torch.save(old_model, f"weights/{weight_name}_pruned_{prune_ratio}.pt")
         torch.save(old_model, os.path.join(save_dir, f"{args.save_name}_{imp_name}_{prune_ratio}.pt"))

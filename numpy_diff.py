@@ -50,7 +50,7 @@ def visualize_array_difference(arr1, arr2, diff_type='absolute'):
     plt.xlabel("Column Index")
     plt.ylabel("Row Index")
     # 保存图片  
-    plt.savefig(f"{diff_type}_maskd_S23.png", dpi=300, bbox_inches='tight')
+    plt.savefig(f"{diff_type}_maskd_S17.png", dpi=300, bbox_inches='tight')
     # 可选：显示每个位置的具体数值（适用于小数组）
     # for i in range(difference.shape[0]):
     #     for j in range(difference.shape[1]):
@@ -69,8 +69,8 @@ def visualize_array_difference(arr1, arr2, diff_type='absolute'):
 # --- 示例使用 ---
 
 # 创建两个形状相同的二维 NumPy 数组
-array1 = np.load("runs/detect/exp41/2007_003020/stage23_C3_features.npy")
-array2 = np.load("runs/detect/exp43/2007_003020/stage23_C3_features.npy")
+array1 = np.load("runs/detect/exp41/2007_003020/stage17_C3_features.npy")
+array2 = np.load("runs/detect/exp43/2007_003020/stage17_C3_features.npy")
 array1 = np.mean(array1, axis=0)
 array2 = np.mean(array2, axis=0)
 
