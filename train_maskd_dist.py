@@ -476,7 +476,7 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
                         if opt.quad:
                             loss *= 4.0
                         maskd_loss = mask_loss.get_loss()
-                        loss += maskd_loss * hyp.getattr("maskd_maskloss_weight", 1.0)
+                        loss += maskd_loss * hyp.get("maskd_maskloss_weight", 1.0)
                 # Backward
                 scaler.scale(loss).backward()
                 mask_loss.reset_loss()
@@ -507,6 +507,10 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
                     callbacks.run("on_train_batch_end", mask_loss.mask_modules, ni, imgs, targets, paths, list(mloss))
                     if callbacks.stop_training:
                         return
+                if iter_num % 100 == 0:
+                    # save maskmodule
+                    mask_loss.save_checkpoint(iter=iter_num, optimizer=mask_optimizer, loss=loss, save_dir=w / f"maskmodule_iter{iter_num}.pt")
+                    LOGGER.info(f"maskdloss: {maskd_loss}, mask module saved to {w / f'maskmodule_iter{iter_num}.pt'}")
                 mask_scheduler.step()
             mask_loss.remove_handle_()       
             if iter_num >= hyp["maskd_mask_trainiter"]:
