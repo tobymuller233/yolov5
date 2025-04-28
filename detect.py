@@ -190,7 +190,7 @@ def run(
         import yaml
 
         maskd_hyp = yaml.safe_load(open(opt.maskd_hyp, "r"))
-        maskmodules = MaskModules(maskd_hyp["maskd_tea_channels"], pretrained=opt.mask_weight).to(device)
+        maskmodules = MaskModules(maskd_hyp["maskd_tea_channels"], pretrained=opt.mask_weight, num_tokens=maskd_hyp["maskd_ntokens"]).to(device)
         mask_hook = Mask_Loss(model.model, maskd_hyp, maskmodules, device=device)
         mask_hook.register_hook()
     seen, windows, dt = 0, [], (Profile(device=device), Profile(device=device), Profile(device=device))
