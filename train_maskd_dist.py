@@ -525,7 +525,10 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
     
     
     if opt.mask_weight:
-        dist_loss = Distillation_Loss(model, t_model, opt.mask_weight, hyp, device=device)
+        if not opt.stu_mask_weight:
+            dist_loss = Distillation_Loss(model, t_model, opt.mask_weight, hyp, device=device)
+        else:
+            dist_loss = Distillation_Loss(model, t_model, opt.mask_weight, hyp, device=device, pretrained_stu_mask=opt.stu_mask_weight)
     else:
         LOGGER.info(f"Using mask module from {w / 'maskmodule.pt'}")
         dist_loss = Distillation_Loss(model, t_model, w/"maskmodule.pt", hyp, device=device)
@@ -761,6 +764,7 @@ def parse_opt(known=False):
     parser.add_argument("--maskd-hyp", type=str, default=ROOT / "data/maskd/default.yaml", help="maskd hyperparameters")
     parser.add_argument("--mask-only", action="store_true", help="train mask module only")
     parser.add_argument("--mask-weight", type=str, default=None, help="mask module weight path")
+    parser.add_argument("--stu-mask-weight", type=str, default=None, help="student mask module weight path")
     parser.add_argument("--yoloreg", action="store_true", help="use yoloreg")
     parser.add_argument("--use-cfg", action="store_true", help="use cfg to create model")
     parser.add_argument("--tea-cfg", type=str, default=None, help="teacher model cfg")
