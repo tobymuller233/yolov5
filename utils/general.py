@@ -1017,6 +1017,7 @@ def non_max_suppression(
     labels=(),
     max_det=300,
     nm=0,  # number of masks
+    show_fmap=False,
 ):
     """
     Non-Maximum Suppression (NMS) on inference results to reject overlapping detections.
@@ -1028,9 +1029,17 @@ def non_max_suppression(
     assert 0 <= conf_thres <= 1, f"Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0"
     assert 0 <= iou_thres <= 1, f"Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0"
     if isinstance(prediction, (list, tuple)):  # YOLOv5 model in validation model, output = (inference_out, loss_out)
+        if show_fmap:
+            ori_pred = prediction[1]
         prediction = prediction[0]  # select only inference output
-
+    
+    anchor2fmap = []
+    if show_fmap:
+        for i, pp in enumerate(ori_pred):
+            for j in range(pp.shape[1] * pp.shape[2] * pp.shape[3]):
+                anchor2fmap.append(i)
     device = prediction.device
+    anchor2fmap = torch.Tensor(anchor2fmap).to(device)
     mps = "mps" in device.type  # Apple MPS
     if mps:  # MPS not fully supported yet, convert tensors to CPU before NMS
         prediction = prediction.cpu()
@@ -1050,11 +1059,13 @@ def non_max_suppression(
     t = time.time()
     mi = 5 + nc  # mask start index
     output = [torch.zeros((0, 6 + nm), device=prediction.device)] * bs
+    output_anchor2fmap = [torch.zeros((0, 1), device=prediction.device)] * bs
     for xi, x in enumerate(prediction):  # image index, image inference
         # Apply constraints
         # x[((x[..., 2:4] < min_wh) | (x[..., 2:4] > max_wh)).any(1), 4] = 0  # width-height
         x = x[xc[xi]]  # confidence
-
+        if show_fmap:
+            anchor2fmap = anchor2fmap[xc[xi]]
         # Cat apriori labels if autolabelling
         if labels and len(labels[xi]):
             lb = labels[xi]
@@ -1095,8 +1106,9 @@ def non_max_suppression(
         n = x.shape[0]  # number of boxes
         if not n:  # no boxes
             continue
+        if show_fmap:
+            anchor2fmap = anchor2fmap[x[:, 4].argsort(descending=True)[:max_nms]]
         x = x[x[:, 4].argsort(descending=True)[:max_nms]]  # sort by confidence and remove excess boxes
-
         # Batched NMS
         c = x[:, 5:6] * (0 if agnostic else max_wh)  # classes
         boxes, scores = x[:, :4] + c, x[:, 4]  # boxes (offset by class), scores
@@ -1111,13 +1123,15 @@ def non_max_suppression(
                 i = i[iou.sum(1) > 1]  # require redundancy
 
         output[xi] = x[i]
+        if show_fmap:
+            output_anchor2fmap[xi] = anchor2fmap[i]
         if mps:
             output[xi] = output[xi].to(device)
         if (time.time() - t) > time_limit:
             LOGGER.warning(f"WARNING ⚠️ NMS time limit {time_limit:.3f}s exceeded")
             break  # time limit exceeded
 
-    return output
+    return output if not show_fmap else (output, output_anchor2fmap)
 
 def non_max_suppression_anchorfree(
     prediction,
