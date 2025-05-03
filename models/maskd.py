@@ -73,7 +73,7 @@ class MaskModule(nn.Module):
 
 class MasKDLoss(nn.Module):
 
-    def __init__(self, channels_s, channels_t, num_tokens=6, weight_mask=True, custom_mask=True, custom_mask_warmup=1000, pretrained=None, loss_weight=1.):
+    def __init__(self, channels_s, channels_t, num_tokens=6, weight_mask=True, custom_mask=True, custom_mask_warmup=1000, pretrained=None, loss_weight=1., pretrained_stu=None):
         super().__init__()
         self.loss_weight = loss_weight
         self.weight_mask = weight_mask
@@ -83,20 +83,25 @@ class MasKDLoss(nn.Module):
         self.mask_modules = nn.ModuleList([
             MaskModule(channels=c, num_tokens=num_tokens, weight_mask=weight_mask) for c in channels_t]
         )
+        
+        self.stu_mask_modules = nn.ModuleList([
+            MaskModule(channels=c, num_tokens=num_tokens, weight_mask=weight_mask) for c in channels_s]
+        ) if pretrained_stu else None
 
         self.align_modules = nn.ModuleList([
             nn.Conv2d(channels_s[i], channels_t[i], kernel_size=1, stride=1, padding=0)
             for i in range(len(channels_s))
         ])
 
-        self.init_weights(pretrained)
+        self.init_weights(pretrained, pretrained_stu)
         for n, p in self.mask_modules.named_parameters():
             p.requires_grad = False
         for n, p in self.align_modules.named_parameters():
             p.requires_grad = True
         self._iter = 0
+        self.use_stu_mask = pretrained_stu is not None
 
-    def init_weights(self, pretrained=None):
+    def init_weights(self, pretrained=None, pretrained_stu=None):
         if pretrained is None:
             return
         # ckpt = _load_checkpoint(pretrained, map_location='cpu')
@@ -106,6 +111,14 @@ class MasKDLoss(nn.Module):
             if 'mask_modules' in k:
                 state_dict[k[k.find('mask_modules'):]] = v
         self.load_state_dict(state_dict, strict=False)
+        if pretrained_stu is None:
+            return
+        ckpt_stu = torch.load(pretrained_stu, map_location='cpu')
+        state_dict_stu = {}
+        for k, v in ckpt_stu['maskd_model'].items():
+            if 'mask_modules' in k:
+                state_dict_stu[k[(k.find('mask_modules') + 13):]] = v
+        self.stu_mask_modules.load_state_dict(state_dict_stu, strict=False)
 
     def forward(self, y_s_list, y_t_list):
         if not isinstance(y_s_list, (tuple, list)):
@@ -114,20 +127,30 @@ class MasKDLoss(nn.Module):
         assert len(y_s_list) == len(y_t_list) == len(self.mask_modules)
 
         losses = []
+        index = 0
         for y_s, y_t, mask_module, align_module in zip(y_s_list, y_t_list, self.mask_modules, self.align_modules):
-            y_s = align_module(y_s)  # [N, C, H, W]
+            if not self.use_stu_mask:
+                y_s = align_module(y_s)  # [N, C, H, W]
             # predict the masks
             mask = mask_module.forward_mask(y_t)
-            if self.custom_mask and self._iter >= self.custom_mask_warmup:
+            if not self.use_stu_mask and self.custom_mask and self._iter >= self.custom_mask_warmup:
                 if self._iter == self.custom_mask_warmup:
                     print('Start customizing masks using student\'s masks.')
                 with torch.no_grad():
                     mask_s = mask_module.forward_mask(y_s)  # [N, T, H, W]
                 mask = mask * mask_s
 
+            if self.use_stu_mask:
+                mask_s = self.stu_mask_modules[index].forward_mask(y_s)
+                masked_y_s = y_s.unsqueeze(1) * mask_s.unsqueeze(2)  # [N, n_masks, C, H, W]
+                bs, n_masks, c, h, w = masked_y_s.shape
+                new_c = y_t.shape[1]
+                masked_y_s = align_module(masked_y_s.view(-1, c, h, w)).view(bs, n_masks, new_c, h, w)
+                index += 1
+            else: 
             # get the masked features
-            masked_y_s = y_s.unsqueeze(1) * \
-                mask.unsqueeze(2)  # [N, n_masks, C, H, W]
+                masked_y_s = y_s.unsqueeze(1) * \
+                    mask.unsqueeze(2)  # [N, n_masks, C, H, W]
             masked_y_t = y_t.unsqueeze(1) * \
                 mask.unsqueeze(2)  # [N, n_masks, C, H, W]
 
@@ -223,7 +246,7 @@ class Mask_Loss:
         }, save_dir)
 
 class Distillation_Loss:
-    def __init__(self, stu_model, tea_model, pretrained_mask, hyp, device="cpu"):
+    def __init__(self, stu_model, tea_model, pretrained_mask, hyp, device="cpu", pretrained_stu_mask=None):
         self.student_modules = []
         self.teacher_modules = []
         self.remove_handle = []
@@ -244,6 +267,7 @@ class Distillation_Loss:
                                   custom_mask=hyp["maskd_custom_mask"],
                                   custom_mask_warmup=hyp["maskd_custom_mask_warmup"],
                                   pretrained=pretrained_mask,
+                                  pretrained_stu=pretrained_stu_mask,
                                   loss_weight=hyp["maskd_masklossweight"]).to(device)
     
     def register_hook(self):

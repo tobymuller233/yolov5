@@ -100,7 +100,8 @@ def run(
     vid_stride=1,  # video frame-rate stride
     maskd_hyp=None,
     mask_weight=None,
-    anchorfree=False
+    anchorfree=False,
+    show_fmap = False
 ):
     """
     Runs YOLOv5 detection inference on various sources like images, videos, directories, streams, etc.
@@ -190,7 +191,7 @@ def run(
         import yaml
 
         maskd_hyp = yaml.safe_load(open(opt.maskd_hyp, "r"))
-        maskmodules = MaskModules(maskd_hyp["maskd_tea_channels"], pretrained=opt.mask_weight).to(device)
+        maskmodules = MaskModules(maskd_hyp["maskd_tea_channels"], pretrained=opt.mask_weight, num_tokens=maskd_hyp["maskd_ntokens"]).to(device)
         mask_hook = Mask_Loss(model.model, maskd_hyp, maskmodules, device=device)
         mask_hook.register_hook()
     seen, windows, dt = 0, [], (Profile(device=device), Profile(device=device), Profile(device=device))
@@ -222,7 +223,12 @@ def run(
         # NMS
         if not anchorfree:
             with dt[2]:
-                pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+                pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det, show_fmap=show_fmap)
+            if isinstance(pred, tuple):
+                anchor2fmap = pred[1]
+                pred = pred[0]
+            else:
+                anchr2fmap = None
         else:
             with dt[2]:
                 pred = non_max_suppression_anchorfree(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
@@ -271,8 +277,13 @@ def run(
                     s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
 
                 # Write results
-                for *xyxy, conf, cls in reversed(det):
+                if show_fmap:
+                    anchor2fmap[i] = reversed(anchor2fmap[i])
+                for ii, (*xyxy, conf, cls) in enumerate(reversed(det)):
                     c = int(cls)  # integer class
+                    feature_layer = ""
+                    if show_fmap:
+                        feature_layer = f"P{int(anchor2fmap[i][ii]) + 3}"
                     label = names[c] if hide_conf else f"{names[c]}"
                     confidence = float(conf)
                     confidence_str = f"{confidence:.2f}"
@@ -293,7 +304,7 @@ def run(
 
                     if save_img or save_crop or view_img:  # Add bbox to image
                         c = int(cls)  # integer class
-                        label = None if hide_labels else (names[c] if hide_conf else f"{names[c]} {conf:.2f}")
+                        label = None if hide_labels else (names[c] if hide_conf else f"{names[c]} {conf:.2f} {feature_layer}")
                         annotator.box_label(xyxy, label, color=colors(c, True))
                     if save_crop:
                         save_one_box(xyxy, imc, file=save_dir / "crops" / names[c] / f"{p.stem}.jpg", BGR=True)
@@ -423,6 +434,7 @@ def parse_opt():
     parser.add_argument("--maskd-hyp", type=str, default=None, help="Use hook to visualize masked feature maps")
     parser.add_argument("--mask-weight", type=str, default=None, help="Path to the mask module weights")
     parser.add_argument("--anchorfree", action="store_true", help="Use anchor-free detection")
+    parser.add_argument("--show-fmap", action="store_true", help="show which feature map is the anchor box from")
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
     print_args(vars(opt))

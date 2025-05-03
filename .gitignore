@@ -24,6 +24,7 @@
 !cfg/yolov3*.cfg
 
 storage.googleapis.com
+runs
 runs/*
 data/*
 data/images/*
@@ -267,3 +268,5 @@ weights
 
 datasets
 weights
+
+Distill_GID_detectron2/

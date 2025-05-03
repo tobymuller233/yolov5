@@ -476,7 +476,7 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
                         if opt.quad:
                             loss *= 4.0
                         maskd_loss = mask_loss.get_loss()
-                        loss += maskd_loss * hyp.getattr("maskd_maskloss_weight", 1.0)
+                        loss += maskd_loss * hyp.get("maskd_maskloss_weight", 1.0)
                 # Backward
                 scaler.scale(loss).backward()
                 mask_loss.reset_loss()
@@ -507,6 +507,10 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
                     callbacks.run("on_train_batch_end", mask_loss.mask_modules, ni, imgs, targets, paths, list(mloss))
                     if callbacks.stop_training:
                         return
+                if iter_num % 100 == 0:
+                    # save maskmodule
+                    mask_loss.save_checkpoint(iter=iter_num, optimizer=mask_optimizer, loss=loss, save_dir=w / f"maskmodule_iter{iter_num}.pt")
+                    LOGGER.info(f"maskdloss: {maskd_loss}, mask module saved to {w / f'maskmodule_iter{iter_num}.pt'}")
                 mask_scheduler.step()
             mask_loss.remove_handle_()       
             if iter_num >= hyp["maskd_mask_trainiter"]:
@@ -521,7 +525,10 @@ def train(hyp, maskd_hyp, opt, device, callbacks):
     
     
     if opt.mask_weight:
-        dist_loss = Distillation_Loss(model, t_model, opt.mask_weight, hyp, device=device)
+        if not opt.stu_mask_weight:
+            dist_loss = Distillation_Loss(model, t_model, opt.mask_weight, hyp, device=device)
+        else:
+            dist_loss = Distillation_Loss(model, t_model, opt.mask_weight, hyp, device=device, pretrained_stu_mask=opt.stu_mask_weight)
     else:
         LOGGER.info(f"Using mask module from {w / 'maskmodule.pt'}")
         dist_loss = Distillation_Loss(model, t_model, w/"maskmodule.pt", hyp, device=device)
@@ -757,6 +764,7 @@ def parse_opt(known=False):
     parser.add_argument("--maskd-hyp", type=str, default=ROOT / "data/maskd/default.yaml", help="maskd hyperparameters")
     parser.add_argument("--mask-only", action="store_true", help="train mask module only")
     parser.add_argument("--mask-weight", type=str, default=None, help="mask module weight path")
+    parser.add_argument("--stu-mask-weight", type=str, default=None, help="student mask module weight path")
     parser.add_argument("--yoloreg", action="store_true", help="use yoloreg")
     parser.add_argument("--use-cfg", action="store_true", help="use cfg to create model")
     parser.add_argument("--tea-cfg", type=str, default=None, help="teacher model cfg")
