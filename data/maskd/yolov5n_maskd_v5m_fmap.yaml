@@ -1,0 +1,28 @@
+# mask training
+maskd_channels: [192, 384, 768]
+maskd_modules: ["model.17.cv3.conv", "model.20.cv3.conv", "model.23.cv3.conv"]
+maskd_ntokens: 6
+maskd_weightmask: True
+maskd_mask_trainiter: 3000 # by iteration
+maskd_mask_lr: {
+  "policy": "CosineAnnealing",
+  "base_lr": 0.001,
+  "min_lr": 0.000001,
+}
+maskd_mask_optimizer: {
+  "type": "Adam",
+  "lr": 0.01,
+  "weight_decay": 0.001,
+}
+
+# distillation
+maskd_stuwarmup: 1    # by epoch
+maskd_masklossweight: 0.01
+maskd_reglossweight: 1.0
+maskd_custom_mask: True  # whether to use custom mask
+maskd_custom_mask_warmup: 1000  # until which student mask would not be used
+maskd_stu_channels: [64, 128, 256]
+maskd_tea_channels: [192, 384, 768]
+maskd_initlr: 0.02
+maskd_dist_momentum: 0.9
+maskd_dist_weight_decay: 0.0001
